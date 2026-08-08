@@ -1,0 +1,10 @@
+.git
+_build
+deps
+node_modules
+priv/static
+erl_crash.dump
+.scratch
+test
+docs
+*.dump
