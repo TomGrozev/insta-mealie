@@ -40,11 +40,15 @@ defmodule InstaMealie.Pipeline do
     id = generate_id()
     now = DateTime.utc_now()
 
+    caption_only =
+      is_binary(input[:caption] || input["caption"]) and (input[:url] || input["url"]) == nil
+
     job = %Job{
       id: id,
       input: input,
       url: input[:url] || input["url"],
       caption: input[:caption] || input["caption"],
+      caption_only: caption_only,
       state: :created,
       stage: nil,
       stages: %{},
@@ -97,6 +101,7 @@ defmodule InstaMealie.Pipeline do
       do: true
 
   def error_retryable?(:validation), do: false
+  def error_retryable?(:incomplete_caption), do: false
   def error_retryable?(_), do: false
 
   @doc """
@@ -167,8 +172,11 @@ defmodule InstaMealie.Pipeline do
   end
 
   @doc """
-  Seam for the paste-caption recovery path (full flow in #25). Persists the
-  supplied caption and marks the job as awaiting paste.
+  Paste-caption recovery path (T6). Persists the supplied caption, transitions
+  a fetch-failed job to `:caption_pasting`, and re-runs the routing LLM call on
+  the same ETS row via the caption-only pipeline path. Also used by the degraded
+  mode create path. Only valid from a fetch-failed state (or an already
+  caption-only job); otherwise returns `{:error, :invalid_state}`.
   """
   def submit_caption(job_id, caption) when is_binary(job_id) and is_binary(caption) do
     case JobStore.get(job_id) do
@@ -176,16 +184,29 @@ defmodule InstaMealie.Pipeline do
         {:error, :not_found}
 
       job ->
-        updated = %{
-          job
-          | caption: caption,
-            state: :caption_pasting,
-            updated_at: DateTime.utc_now()
-        }
+        if job.error_stage == :fetch or job.caption_only do
+          stop_job(job_id)
 
-        JobStore.put(updated)
-        broadcast(updated)
-        {:ok, job_id}
+          updated = %{
+            job
+            | caption: caption,
+              state: :caption_pasting,
+              caption_only: true,
+              stage: nil,
+              stages: %{},
+              error_stage: nil,
+              error_class: nil,
+              error_summary: nil,
+              updated_at: DateTime.utc_now()
+          }
+
+          JobStore.put(updated)
+          broadcast(updated)
+          DynamicSupervisor.start_child(JobSupervisor, {Job, updated})
+          {:ok, job_id}
+        else
+          {:error, :invalid_state}
+        end
     end
   end
 
