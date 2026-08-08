@@ -19,6 +19,7 @@ defmodule InstaMealieWeb.Router do
       pipe_through :browser
 
       live "/", JobsLive, :index
+      live "/jobs/:id/review", ReviewLive, :index
     end
   end
 

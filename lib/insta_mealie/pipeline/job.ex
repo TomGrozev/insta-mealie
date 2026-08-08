@@ -33,6 +33,7 @@ defmodule InstaMealie.Pipeline.Job do
     :error_summary,
     :retry_count,
     :output_language,
+    :review,
     :inserted_at,
     :updated_at
   ]
@@ -130,7 +131,7 @@ defmodule InstaMealie.Pipeline.Job do
             |> skip_stage(:transcribe)
             |> skip_stage(:llm_merge)
             |> persist()
-            |> run_import()
+            |> run_import_or_review()
 
           _other ->
             fail_incomplete_caption(job)
@@ -161,7 +162,7 @@ defmodule InstaMealie.Pipeline.Job do
     |> set_stage(:llm_format, :done)
     |> set_stage(:llm_merge, :skipped)
     |> persist()
-    |> run_import()
+    |> run_import_or_review()
   end
 
   defp run_fetch(job) do
@@ -201,7 +202,7 @@ defmodule InstaMealie.Pipeline.Job do
             |> skip_stage(:transcribe)
             |> skip_stage(:llm_merge)
             |> persist()
-            |> run_import()
+            |> run_import_or_review()
 
           :recipe_partial ->
             run_transcribe(job, fetch)
@@ -244,11 +245,65 @@ defmodule InstaMealie.Pipeline.Job do
           |> set_recipe(env.recipe)
           |> persist()
 
-        run_import(job)
+        run_import_or_review(job)
 
       {:error, class, reason} ->
         fail(job, :llm_merge, class, reason)
     end
+  end
+
+  defp run_import_or_review(job) do
+    recipe = job.recipe || %{}
+    raw_list = recipe["recipeIngredient"] || []
+
+    if raw_list == [] do
+      run_import(job)
+    else
+      case Clients.parse_ingredients(raw_list) do
+        {:ok, parsed} ->
+          ingredients =
+            Enum.with_index(parsed)
+            |> Enum.map(fn {p, i} ->
+              %{
+                index: i,
+                raw: Enum.at(raw_list, i),
+                quantity: p["quantity"],
+                unit: p["unit"],
+                food: p["food"],
+                food_id: p["food_id"],
+                food_confidence: p["food_confidence"],
+                note: p["note"],
+                unknown: unknown?(p)
+              }
+            end)
+
+          if Enum.any?(ingredients, & &1.unknown) do
+            enter_review(job, ingredients)
+          else
+            run_import(job)
+          end
+
+        {:error, _class, _reason} ->
+          run_import(job)
+      end
+    end
+  end
+
+  defp unknown?(parsed) do
+    confidence = Map.get(parsed, "food_confidence")
+    food_id = Map.get(parsed, "food_id")
+    confidence == nil or confidence < 0.85 or food_id == nil
+  end
+
+  defp enter_review(job, ingredients) do
+    job = %{
+      job
+      | state: :needs_review,
+        stages: Map.put(job.stages, :mealie_import, :pending),
+        review: %{ingredients: ingredients}
+    }
+
+    persist(job)
   end
 
   defp run_import(job) do

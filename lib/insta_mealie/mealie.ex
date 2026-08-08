@@ -12,4 +12,6 @@ defmodule InstaMealie.Mealie do
   @callback deep_link(slug :: String.t()) :: String.t()
   @callback search_foods(term :: String.t()) :: {:ok, list()} | {:error, atom(), term()}
   @callback search_units(term :: String.t()) :: {:ok, list()} | {:error, atom(), term()}
+  @callback parse_ingredients(list :: list(String.t())) ::
+              {:ok, list(map())} | {:error, atom(), term()}
 end
