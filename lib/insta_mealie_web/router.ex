@@ -14,10 +14,12 @@ defmodule InstaMealieWeb.Router do
     plug :accepts, ["json"]
   end
 
-  scope "/", InstaMealieWeb do
-    pipe_through :browser
+  live_session :default do
+    scope "/", InstaMealieWeb do
+      pipe_through :browser
 
-    get "/", PageController, :home
+      live "/", JobsLive, :index
+    end
   end
 
   # Other scopes may use custom stacks.

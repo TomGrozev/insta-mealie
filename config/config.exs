@@ -8,7 +8,6 @@
 import Config
 
 config :insta_mealie,
-  ecto_repos: [InstaMealie.Repo],
   generators: [timestamp_type: :utc_datetime]
 
 # Configure the endpoint
@@ -65,6 +64,19 @@ config :logger, :default_formatter,
 
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
+
+# For T1 the three external clients are stubbed so the app runs with zero network.
+# Later tickets swap these for Req-backed real adapters.
+config :insta_mealie, :clients,
+  mealie: InstaMealie.MealieStub,
+  llm: InstaMealie.LlmStub,
+  ytdlp: InstaMealie.YtDlpStub
+
+# Pipeline housekeeping defaults (overridable per environment / test).
+config :insta_mealie, InstaMealie.Pipeline,
+  ttl_ms: 24 * 60 * 60 * 1000,
+  cap: 500,
+  sweep_interval_ms: 5 * 60 * 1000
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.

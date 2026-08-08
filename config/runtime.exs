@@ -1,5 +1,24 @@
 import Config
 
+# InstaMealie external service configuration — read from the environment at runtime
+# so a release can be configured without recompiling. Secrets are never hard-coded.
+config :insta_mealie, :openai,
+  base_url: System.get_env("INSTA_MEALIE_OPENAI_BASE_URL") || "https://api.openai.com/v1",
+  api_key: System.get_env("INSTA_MEALIE_OPENAI_API_KEY") || "",
+  model: System.get_env("INSTA_MEALIE_OPENAI_MODEL") || "gpt-4o-mini",
+  merge_model:
+    System.get_env("INSTA_MEALIE_OPENAI_MERGE_MODEL") ||
+      System.get_env("INSTA_MEALIE_OPENAI_MODEL") || "gpt-4o-mini"
+
+config :insta_mealie, :mealie,
+  base_url: System.get_env("MEALIE_BASE_URL") || "http://localhost:9000",
+  api_token: System.get_env("MEALIE_API_TOKEN") || "",
+  group_slug: System.get_env("MEALIE_GROUP_SLUG") || "home"
+
+config :insta_mealie, :insta_mealie,
+  ig_cookies_path: System.get_env("INSTA_MEALIE_IG_COOKIES_PATH"),
+  output_language: System.get_env("INSTA_MEALIE_OUTPUT_LANGUAGE") || "en"
+
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the
 # system starts, so it is typically used to load production configuration
@@ -41,23 +60,6 @@ if config_env() == :dev do
 end
 
 if config_env() == :prod do
-  database_url =
-    System.get_env("DATABASE_URL") ||
-      raise """
-      environment variable DATABASE_URL is missing.
-      For example: ecto://USER:PASS@HOST/DATABASE
-      """
-
-  maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
-
-  config :insta_mealie, InstaMealie.Repo,
-    # ssl: true,
-    url: database_url,
-    pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
-    # For machines with several cores, consider starting multiple pools of `pool_size`
-    # pool_count: 4,
-    socket_options: maybe_ipv6
-
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you
   # want to use a different value for prod and you most likely don't want
