@@ -10,6 +10,7 @@ defmodule InstaMealie.Pipeline.Job do
   use GenServer
 
   alias InstaMealie.Pipeline.{JobStore, Clients}
+  alias InstaMealie.Llm
   alias InstaMealie.PubSub
 
   defstruct [
@@ -22,6 +23,7 @@ defmodule InstaMealie.Pipeline.Job do
     :stages,
     :recipe,
     :verdict,
+    :missing_fields,
     :slug,
     :deep_link,
     :error_stage,
@@ -51,6 +53,31 @@ defmodule InstaMealie.Pipeline.Job do
     {:noreply, run_pipeline(job)}
   end
 
+  # ---- Public helpers (also used by tests) ----
+
+  @doc """
+  Keep only the comments authored by the reel's owner (OP).
+
+  `op` is the reel author's username (from the fetch result). Each comment
+  is a map with an `:author` (or `"author"`) key. Comments without a
+  matching author are dropped. Non-OP comments must never reach the
+  routing LLM call.
+  """
+  def filter_op_comments(op, comments) when is_binary(op) do
+    Enum.filter(comments || [], fn comment ->
+      author =
+        case comment do
+          %{author: a} -> a
+          %{"author" => a} -> a
+          _ -> nil
+        end
+
+      author == op
+    end)
+  end
+
+  def filter_op_comments(_op, _comments), do: []
+
   # ---- FSM ----
 
   defp run_pipeline(job) do
@@ -72,18 +99,26 @@ defmodule InstaMealie.Pipeline.Job do
   end
 
   defp run_format(job, fetch) do
+    op_comments = filter_op_comments(Map.get(fetch, :author), Map.get(fetch, :comments))
+
     job = set_stage(job, :llm_format, :running) |> persist()
 
-    case Clients.format(fetch.caption, output_language: job.output_language) do
+    case Clients.format(fetch.caption,
+           comments: op_comments,
+           output_language: job.output_language
+         ) do
       {:ok, envelope} ->
+        env = Llm.normalize_envelope(envelope)
+
         job =
           job
           |> set_stage(:llm_format, :done)
-          |> set_recipe(envelope.recipe)
-          |> set_verdict(envelope.completeness)
+          |> set_recipe(env.recipe)
+          |> set_verdict(env.completeness)
+          |> set_missing_fields(env.missing_fields)
           |> persist()
 
-        case envelope.completeness do
+        case env.completeness do
           :recipe_complete ->
             job
             |> skip_stage(:transcribe)
@@ -95,7 +130,7 @@ defmodule InstaMealie.Pipeline.Job do
             run_transcribe(job, fetch)
 
           :no_recipe ->
-            fail(job, :llm_format, :no_recipe, "The caption does not contain a complete recipe.")
+            run_transcribe(job, fetch)
         end
 
       {:error, class, reason} ->
@@ -121,10 +156,12 @@ defmodule InstaMealie.Pipeline.Job do
 
     case Clients.merge(fetch.caption, transcript, output_language: job.output_language) do
       {:ok, envelope} ->
+        env = Llm.normalize_envelope(envelope)
+
         job =
           job
           |> set_stage(:llm_merge, :done)
-          |> set_recipe(envelope.recipe)
+          |> set_recipe(env.recipe)
           |> persist()
 
         run_import(job)
@@ -164,6 +201,7 @@ defmodule InstaMealie.Pipeline.Job do
 
   defp set_recipe(job, recipe), do: %{job | recipe: recipe}
   defp set_verdict(job, verdict), do: %{job | verdict: verdict}
+  defp set_missing_fields(job, missing_fields), do: %{job | missing_fields: missing_fields}
   defp set_slug(job, slug), do: %{job | slug: slug}
   defp set_deep_link(job, link), do: %{job | deep_link: link}
   defp set_state(job, state), do: %{job | state: state}

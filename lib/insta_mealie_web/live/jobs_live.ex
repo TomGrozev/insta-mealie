@@ -129,7 +129,7 @@ defmodule InstaMealieWeb.JobsLive do
 
       <div class="mt-3 flex flex-wrap gap-2">
         <%= for stage <- [:fetch, :transcribe, :llm_format, :llm_merge, :mealie_import] do %>
-          <span class={stage_chip_class(Map.get(@job.stages, stage, :pending))}>
+          <span data-stage={stage} class={stage_chip_class(Map.get(@job.stages, stage, :pending))}>
             {stage_label(stage)}
           </span>
         <% end %>
