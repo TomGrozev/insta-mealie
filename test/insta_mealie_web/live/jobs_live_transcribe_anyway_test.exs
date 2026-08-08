@@ -66,7 +66,7 @@ defmodule InstaMealieWeb.JobsLiveTranscribeAnywayTest do
 
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded}}, 5000
       job = Pipeline.get_job(id)
-      assert job.transcribe_anyway == true
+      assert job.mode == :skip_audio
       assert job.recipe == %{"name" => "Partial"}
       refute has_element?(view, "#transcribe-anyway-#{id}")
       assert has_element?(view, "#deep-link-#{id}")
@@ -121,7 +121,7 @@ defmodule InstaMealieWeb.JobsLiveTranscribeAnywayTest do
 
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded}}, 5000
       job = Pipeline.get_job(id)
-      assert job.transcribe_anyway == true
+      assert job.mode == :skip_audio
       assert job.recipe == %{"name" => "Partial"}
       refute has_element?(view, "#transcribe-anyway-#{id}")
       assert has_element?(view, "#deep-link-#{id}")
@@ -133,8 +133,7 @@ defmodule InstaMealieWeb.JobsLiveTranscribeAnywayTest do
         input: %{url: "https://instagram.com/reel/x"},
         url: "https://instagram.com/reel/x",
         caption: "Some caption",
-        caption_only: false,
-        transcribe_anyway: true,
+        mode: :skip_audio,
         state: :created,
         stage: nil,
         stages: %{},

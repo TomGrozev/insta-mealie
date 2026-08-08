@@ -26,7 +26,6 @@ config :phoenix_live_view,
   # the attribute set on all root tags. Used for Phoenix.LiveView.ColocatedCSS.
   root_tag_attribute: "phx-r"
 
-
 # Configure esbuild (the version is required)
 config :esbuild,
   version: "0.25.4",
@@ -65,6 +64,19 @@ config :insta_mealie, InstaMealie.Pipeline,
   ttl_ms: 24 * 60 * 60 * 1000,
   cap: 500,
   sweep_interval_ms: 5 * 60 * 1000
+
+# Per-stage pipeline deadlines in milliseconds. Each stage's `handle_info`
+# schedules a `{:stage_timeout, stage}` message at this delay; if the stage
+# is still `:running` when the message arrives, the job is failed with
+# error_class `:timeout`. Set a stage to 0 to disable its timeout.
+config :insta_mealie, :insta_mealie,
+  stage_timeouts: %{
+    fetch: 120_000,
+    llm_format: 180_000,
+    transcribe: 300_000,
+    llm_merge: 180_000,
+    mealie_import: 60_000
+  }
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.

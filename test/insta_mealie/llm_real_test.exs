@@ -1,7 +1,7 @@
-defmodule InstaMealie.LlmRealTest do
+defmodule InstaMealie.LLMRealTest do
   use ExUnit.Case, async: true
 
-  alias InstaMealie.Llm
+  alias InstaMealie.LLM
 
   setup do
     on_exit(fn ->
@@ -25,7 +25,7 @@ defmodule InstaMealie.LlmRealTest do
         "recipe" => %{"name" => "Test Recipe", "recipeIngredient" => ["flour"]}
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
 
       assert result.completeness == :recipe_complete
       assert result.missing_fields == []
@@ -40,7 +40,7 @@ defmodule InstaMealie.LlmRealTest do
         "recipe" => %{"name" => "Partial Recipe"}
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
 
       assert result.completeness == :recipe_partial
       assert result.missing_fields == [:recipeInstructions]
@@ -54,7 +54,7 @@ defmodule InstaMealie.LlmRealTest do
         "recipe" => %{}
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
 
       assert result.completeness == :no_recipe
       assert result.missing_fields == []
@@ -68,7 +68,7 @@ defmodule InstaMealie.LlmRealTest do
         "recipe" => %{}
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       refute Map.has_key?(result.recipe, "name")
     end
 
@@ -79,7 +79,7 @@ defmodule InstaMealie.LlmRealTest do
         "recipe" => %{"name" => "X"}
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       assert result.missing_fields == [:recipeIngredient, :recipeInstructions]
     end
 
@@ -90,7 +90,7 @@ defmodule InstaMealie.LlmRealTest do
         "recipe" => %{"name" => "X"}
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       assert result.completeness == :unknown
     end
 
@@ -100,7 +100,7 @@ defmodule InstaMealie.LlmRealTest do
         "missing_fields" => []
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       assert result.recipe == %{}
     end
 
@@ -110,7 +110,7 @@ defmodule InstaMealie.LlmRealTest do
         "recipe" => %{"name" => "X"}
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       assert result.missing_fields == []
     end
   end
@@ -128,7 +128,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       assert result.recipe["totalTime"] == "PT1H20M"
     end
 
@@ -142,7 +142,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       assert result.recipe["totalTime"] == "PT40M"
     end
 
@@ -156,7 +156,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       assert result.recipe["prepTime"] == "PT1H"
     end
 
@@ -170,7 +170,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       assert result.recipe["cookTime"] == "PT1H20M"
     end
 
@@ -184,7 +184,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       assert result.recipe["performTime"] == "PT1H20M"
     end
 
@@ -198,7 +198,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       assert result.recipe["totalTime"] == "PT2H"
     end
 
@@ -212,7 +212,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       assert result.recipe["totalTime"] == "PT1H30M"
     end
 
@@ -226,7 +226,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       assert result.recipe["totalTime"] == "PT1H30M"
     end
 
@@ -240,7 +240,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       assert result.recipe["totalTime"] == "until done"
     end
 
@@ -254,7 +254,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Llm.envelope_from_json(json)
+      result = LLM.envelope_from_json(json)
       refute Map.has_key?(result.recipe, "totalTime")
     end
   end
@@ -284,7 +284,7 @@ defmodule InstaMealie.LlmRealTest do
       end)
 
       assert {:ok, result} =
-               Llm.format("Pasta recipe caption", output_language: "en", comments: [])
+               LLM.format("Pasta recipe caption", output_language: "en", comments: [])
 
       assert result.completeness == :recipe_complete
       assert result.recipe["name"] == "Pasta Aglio e Olio"
@@ -312,7 +312,7 @@ defmodule InstaMealie.LlmRealTest do
          }}
       end)
 
-      assert {:ok, result} = Llm.format("Test caption", output_language: "fr", comments: [])
+      assert {:ok, result} = LLM.format("Test caption", output_language: "fr", comments: [])
       assert result.recipe["name"] == "Test"
     end
 
@@ -331,7 +331,7 @@ defmodule InstaMealie.LlmRealTest do
          }}
       end)
 
-      assert {:ok, result} = Llm.format("No recipe here", output_language: "en", comments: [])
+      assert {:ok, result} = LLM.format("No recipe here", output_language: "en", comments: [])
       assert result.completeness == :no_recipe
       assert result.recipe == %{}
     end
@@ -364,7 +364,7 @@ defmodule InstaMealie.LlmRealTest do
       draft = %{"name" => "Partial Draft", "recipeIngredient" => ["ingredient1"]}
 
       assert {:ok, result} =
-               Llm.merge(
+               LLM.merge(
                  "Original caption",
                  "Transcript of the voiceover",
                  output_language: "en",
@@ -391,7 +391,7 @@ defmodule InstaMealie.LlmRealTest do
       end)
 
       assert {:ok, result} =
-               Llm.merge("Caption", "Transcript", output_language: "en")
+               LLM.merge("Caption", "Transcript", output_language: "en")
 
       assert result.recipe["name"] == "From Transcript Only"
     end
@@ -408,7 +408,7 @@ defmodule InstaMealie.LlmRealTest do
          }}
       end)
 
-      assert {:error, :api_error, _} = Llm.format("x", output_language: "en")
+      assert {:error, :api_error, _} = LLM.format("x", output_language: "en")
     end
   end
 
@@ -421,7 +421,7 @@ defmodule InstaMealie.LlmRealTest do
       end)
 
       assert {:error, :auth, "unauthorized"} =
-               Llm.format("test", output_language: "en", comments: [])
+               LLM.format("test", output_language: "en", comments: [])
     end
 
     test "merge returns error tuple on HTTP failure" do
@@ -430,7 +430,7 @@ defmodule InstaMealie.LlmRealTest do
       end)
 
       assert {:error, :auth, "unauthorized"} =
-               Llm.merge("caption", "transcript", output_language: "en")
+               LLM.merge("caption", "transcript", output_language: "en")
     end
   end
 end

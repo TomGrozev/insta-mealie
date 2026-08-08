@@ -13,8 +13,11 @@ defmodule InstaMealie.Pipeline do
   """
   use Supervisor
 
-  alias InstaMealie.Pipeline.{Job, JobStore, JobSupervisor, Sweeper}
+  require Logger
+
+  alias InstaMealie.Pipeline.{Job, JobAdmission, JobStore, JobSupervisor, Sweeper}
   alias InstaMealie.PubSub
+  alias InstaMealie.Recipe
 
   @doc false
   def start_link(opts) do
@@ -26,6 +29,7 @@ defmodule InstaMealie.Pipeline do
     children = [
       {Registry, [keys: :unique, name: __MODULE__.Registry]},
       {DynamicSupervisor, [strategy: :one_for_one, name: __MODULE__.JobSupervisor]},
+      {JobAdmission, []},
       {Sweeper, []}
     ]
 
@@ -37,46 +41,62 @@ defmodule InstaMealie.Pipeline do
   Returns `{:ok, job_id}`.
   """
   def create_job(input) when is_map(input) do
-    id = generate_id()
-    now = DateTime.utc_now()
-
     url = input[:url] || input["url"]
     caption = input[:caption] || input["caption"]
-    caption_only = is_binary(caption) and url == nil
+    normalized_url = normalize_url(url)
+    force = input[:force] || input["force"] || false
 
-    job = %Job{
-      id: id,
-      input: input,
-      url: url,
-      caption: caption,
-      caption_only: caption_only,
-      transcribe_anyway: false,
-      state: :created,
-      stage: nil,
-      stages: %{},
-      recipe: nil,
-      verdict: nil,
-      missing_fields: nil,
-      slug: nil,
-      deep_link: nil,
-      error_stage: nil,
-      error_class: nil,
-      error_summary: nil,
-      retry_count: %{},
-      review: nil,
-      output_language: output_language(),
-      inserted_at: now,
-      updated_at: now
-    }
+    with :ok <- check_duplicate_url(normalized_url, force) do
+      id = generate_id()
+      now = DateTime.utc_now()
 
-    JobStore.put(job)
-    broadcast(job)
+      mode = if(is_binary(caption) and url == nil, do: :caption_only, else: :url)
 
-    case DynamicSupervisor.start_child(JobSupervisor, {Job, job}) do
-      {:ok, _pid} -> {:ok, id}
-      {:ok, _pid, _info} -> {:ok, id}
-      {:error, {:already_started, _pid}} -> {:ok, id}
-      other -> other
+      Logger.info(
+        "[pipeline] job created #{id} (mode: #{mode})"
+      )
+
+      job = %Job{
+        id: id,
+        input: input,
+        url: url,
+        caption: caption,
+        mode: mode,
+        state: :created,
+        stage: nil,
+        stages: %{},
+        recipe: nil,
+        verdict: nil,
+        missing_fields: nil,
+        slug: nil,
+        deep_link: nil,
+        error_stage: nil,
+        error_class: nil,
+        error_summary: nil,
+        retry_count: %{},
+        output_language: output_language(),
+        stage_started_at: nil,
+        inserted_at: now,
+        updated_at: now
+      }
+
+      job = transition(job, [])
+
+      case JobAdmission.request(id) do
+        :admitted ->
+          spec = Supervisor.child_spec({Job, job}, restart: :temporary)
+
+          case DynamicSupervisor.start_child(JobSupervisor, spec) do
+            {:ok, _pid} -> {:ok, id}
+            {:ok, _pid, _info} -> {:ok, id}
+            {:error, {:already_started, _pid}} -> {:ok, id}
+            other -> other
+          end
+
+        {:queued, position} ->
+          transition(job, [{:state, :queued}])
+          {:ok, id, position}
+      end
     end
   end
 
@@ -87,10 +107,16 @@ defmodule InstaMealie.Pipeline do
   def list_recent_jobs, do: JobStore.list()
 
   @doc """
-  Whether a pipeline error class represents a retryable failure (vs. a dead
+  Whether a pipeline error represents a retryable failure (vs. a dead
   row). `validation` is terminal; `network` / `auth` and the other transient
   classes are retryable. Consumed by the retry UI (later ticket).
+
+  Accepts either a bare class atom (legacy contract) or an
+  `InstaMealie.Error` struct (post-#45 contract) — retryability is the same
+  for both, so the struct form delegates to the bare-atom predicates below.
   """
+  def error_retryable?(%InstaMealie.Error{} = error), do: error_retryable?(error.class)
+
   def error_retryable?(class)
       when class in [
              :network,
@@ -105,77 +131,22 @@ defmodule InstaMealie.Pipeline do
   def error_retryable?(:auth), do: false
   def error_retryable?(:validation), do: false
   def error_retryable?(:incomplete_caption), do: false
+  def error_retryable?(:cancelled), do: false
   def error_retryable?(_), do: false
 
   @doc """
   Retry a job from the start, preserving its `job_id`. Each retry is counted
   per failing stage (capped at 2 in the UI — see `InstaMealieWeb.JobsLive`);
   once a stage's retry budget is exhausted, the Retry CTA is hidden.
+
+  Thin facade: forwards to the job's GenServer, which owns the mutation and
+  re-runs the FSM. A mealie_import-only retry re-runs the import on the same
+  job without resetting the recipe; all other retries re-run from `:created`.
   """
   def retry(job_id) when is_binary(job_id) do
     case JobStore.get(job_id) do
-      nil ->
-        {:error, :not_found}
-
-      %{error_stage: :mealie_import} = job when not is_nil(job.recipe) ->
-        stop_job(job_id)
-        run_import_inline(job)
-
-      job ->
-        stop_job(job_id)
-
-        old_stage = job.error_stage
-
-        retry_count =
-          if old_stage do
-            Map.put(job.retry_count, old_stage, Map.get(job.retry_count, old_stage, 0) + 1)
-          else
-            job.retry_count
-          end
-
-        reset =
-          %{
-            job
-            | state: :created,
-              stage: nil,
-              stages: %{},
-              recipe: nil,
-              verdict: nil,
-              missing_fields: nil,
-              slug: nil,
-              deep_link: nil,
-              error_stage: nil,
-              error_class: nil,
-              error_summary: nil,
-              transcribe_anyway: false,
-              retry_count: retry_count,
-              updated_at: DateTime.utc_now()
-          }
-
-        JobStore.put(reset)
-        broadcast(reset)
-        DynamicSupervisor.start_child(JobSupervisor, {Job, reset})
-        {:ok, job_id}
-    end
-  end
-
-  @doc """
-  Manually import a job that already has a recipe draft. The happy path
-  auto-imports; this is the seam for the post-review import.
-  """
-  def import(job_id) when is_binary(job_id) do
-    case JobStore.get(job_id) do
-      nil ->
-        {:error, :not_found}
-
-      %{state: :succeeded} = job ->
-        {:ok, job}
-
-      %{recipe: nil} ->
-        {:error, :no_recipe}
-
-      job ->
-        run_import_inline(job)
+      nil -> {:error, :not_found}
+      _job -> wrap_job_id(call_job(job_id, :retry), job_id)
     end
   end
 
@@ -185,6 +156,9 @@ defmodule InstaMealie.Pipeline do
   the same ETS row via the caption-only pipeline path. Also used by the degraded
   mode create path. Only valid from a fetch-failed state (or an already
   caption-only job); otherwise returns `{:error, :invalid_state}`.
+
+  Thin facade: validates the pre-condition locally, then forwards to the
+  job's GenServer for the mutation and pipeline re-run.
   """
   def submit_caption(job_id, caption) when is_binary(job_id) and is_binary(caption) do
     case JobStore.get(job_id) do
@@ -192,27 +166,9 @@ defmodule InstaMealie.Pipeline do
         {:error, :not_found}
 
       job ->
-        if job.error_stage == :fetch or job.caption_only do
-          stop_job(job_id)
-
-          updated = %{
-            job
-            | caption: caption,
-              state: :caption_pasting,
-              caption_only: true,
-              transcribe_anyway: false,
-              stage: nil,
-              stages: %{},
-              error_stage: nil,
-              error_class: nil,
-              error_summary: nil,
-              updated_at: DateTime.utc_now()
-          }
-
-          JobStore.put(updated)
-          broadcast(updated)
-          DynamicSupervisor.start_child(JobSupervisor, {Job, updated})
-          {:ok, job_id}
+        if job.error_stage == :fetch or job.mode == :caption_only do
+          Logger.info("[pipeline] job #{job_id} pasting caption recovery")
+          wrap_job_id(call_job(job_id, {:submit_caption, caption}), job_id)
         else
           {:error, :invalid_state}
         end
@@ -224,36 +180,25 @@ defmodule InstaMealie.Pipeline do
   `:llm_merge` stage, skip the failed audio and import the caption-only (routing)
   recipe already on the job, reusing the same `job_id`. This is a one-shot,
   in-place re-run: the row is reset to `:created` (keeping its `recipe`,
-  `caption`, `verdict`, and `retry_count`), the `transcribe_anyway` flag is set so
-  the GenServer takes the skip-audio FSM branch, and a fresh GenServer is started.
+  `caption`, `verdict`, and `retry_count`), and the GenServer takes the
+  skip-audio FSM branch.
   Returns `{:error, :invalid_state}` when the job is not in a transcribe/merge
   failure state, and `{:error, :not_found}` when unknown.
+
+  Thin facade: validates the pre-condition locally, then forwards to the
+  job's GenServer for the mutation and pipeline re-run.
   """
   def apply_transcribe_anyway(job_id) when is_binary(job_id) do
     case JobStore.get(job_id) do
       nil ->
         {:error, :not_found}
 
-      %{error_stage: stage} = job when stage in [:transcribe, :llm_merge] ->
-        stop_job(job_id)
+      %{error_stage: stage} = _job when stage in [:transcribe, :llm_merge] ->
+        Logger.info(
+          "[pipeline] job #{job_id} applying transcribe-anyway override (failed at #{stage})"
+        )
 
-        updated = %{
-          job
-          | state: :created,
-            stage: nil,
-            stages: %{},
-            error_stage: nil,
-            error_class: nil,
-            error_summary: nil,
-            transcribe_anyway: true,
-            caption_only: false,
-            updated_at: DateTime.utc_now()
-        }
-
-        JobStore.put(updated)
-        broadcast(updated)
-        DynamicSupervisor.start_child(JobSupervisor, {Job, updated})
-        {:ok, job_id}
+        wrap_job_id(call_job(job_id, :transcribe_anyway), job_id)
 
       _other ->
         {:error, :invalid_state}
@@ -261,114 +206,333 @@ defmodule InstaMealie.Pipeline do
   end
 
   @doc """
-  Apply ingredient resolutions from the review screen (T8). Replaces the raw
-  ingredient strings in the recipe with the user's picks, then fires the import.
+  Apply ingredient resolutions from the review screen (T8). Merges the user's
+  picks into the job's recipe ingredients and fires the import.
+
+  Thin facade: forwards to the job's GenServer, which owns the recipe merge
+  and the import. No other process mutates the recipe or calls the importer.
+  Returns the import result directly: `{:ok, updated_job}` on success or
+  `{:error, class, reason}` on failure.
   """
   def apply_ingredient_resolutions(job_id, resolutions) when is_binary(job_id) do
+    case JobStore.get(job_id) do
+      nil -> {:error, :not_found}
+      _job -> call_job(job_id, {:resolve_ingredients, resolutions})
+    end
+  end
+
+  @doc """
+  Cancel a job. Queued jobs are removed from the admission queue; running
+  jobs receive a `:cancel` cast on their GenServer. Terminal jobs return
+  `{:error, :already_terminal}`.
+  """
+  def cancel_job(job_id) when is_binary(job_id) do
     case JobStore.get(job_id) do
       nil ->
         {:error, :not_found}
 
-      job ->
-        ingredients = get_in(job.review, [:ingredients])
-        raw_list = job.recipe["recipeIngredient"] || []
+      %{state: :queued} = job ->
+        JobAdmission.cancel(job_id)
+        job = transition(job, [{:state, :cancelled}])
+        {:ok, job_id}
 
-        if ingredients == nil do
-          run_import_inline(job)
-        else
-          new_list =
-            Enum.with_index(raw_list)
-            |> Enum.map(fn {raw, i} ->
-              resolution =
-                Map.get(resolutions, i) || Map.get(resolutions, to_string(i))
+      %{state: state} = _job when state in [:succeeded, :failed, :cancelled] ->
+        {:error, :already_terminal}
 
-              case resolution do
-                nil ->
-                  raw
+      _job ->
+        case Registry.lookup(__MODULE__.Registry, job_id) do
+          [{pid, _}] ->
+            GenServer.cast(pid, :cancel)
+            {:ok, job_id}
 
-                %{"food" => food, "unit" => unit} ->
-                  ing = Enum.find(ingredients, fn ing -> ing.index == i end)
-                  ing_quantity = if ing, do: ing.quantity, else: nil
-                  ing_note = if ing, do: ing.note, else: nil
-
-                  obj = %{"quantity" => ing_quantity, "food" => food}
-
-                  obj =
-                    if unit && unit != "",
-                      do: Map.put(obj, "unit", unit),
-                      else: obj
-
-                  obj =
-                    if ing_note,
-                      do: Map.put(obj, "note", ing_note),
-                      else: obj
-
-                  obj
-
-                _ ->
-                  raw
-              end
-            end)
-
-          resolved_recipe = put_in(job.recipe, ["recipeIngredient"], new_list)
-
-          updated_job = %{
-            job
-            | recipe: resolved_recipe,
-              review: nil,
-              stage: :mealie_import,
-              stages: Map.put(job.stages, :mealie_import, :running)
-          }
-
-          JobStore.put(updated_job)
-          broadcast(updated_job)
-          run_import_inline(updated_job)
+          [] ->
+            {:error, :process_gone}
         end
     end
   end
 
+  # Look up the job's GenServer pid in the registry and forward the command.
+  # Returns `{:error, :process_gone}` if the process has already exited (e.g.
+  # the row is still in ETS because the sweeper hasn't run yet, but the
+  # GenServer is no longer registered).
+  defp call_job(job_id, message) do
+    case Registry.lookup(__MODULE__.Registry, job_id) do
+      [{pid, _}] -> GenServer.call(pid, message, 60_000)
+      [] -> {:error, :process_gone}
+    end
+  end
+
+  # Wrap a successful GenServer reply as `{:ok, job_id}` for the public
+  # facade contract. The GenServer replies with `:ok` for fire-and-forget
+  # commands, but callers historically expect `{:ok, job_id}`. Errors and
+  # already-shaped `{:ok, _}` tuples pass through unchanged.
+  defp wrap_job_id(:ok, job_id), do: {:ok, job_id}
+  defp wrap_job_id({:ok, _} = ok, _job_id), do: ok
+  defp wrap_job_id(other, _job_id), do: other
+
+  @doc """
+  Apply one or more changes to a job. Persists to JobStore and broadcasts
+  exactly once after all changes are applied. Rejects illegal state
+  transitions.
+
+  This is the ONLY place where job state is mutated, persisted, and broadcast.
+  All GenServer helpers and inline mutation blocks elsewhere in the codebase
+  must funnel through this function.
+
+  Valid changes (each a 2- or 3-tuple):
+
+    * `{:state, atom}` — set job state
+    * `{:stage, atom, atom}` — set {stage, status} in stages map (also sets `job.stage`)
+    * `{:recipe, map | nil}` — set recipe
+    * `{:verdict, atom | nil}` — set verdict
+    * `{:missing_fields, list | nil}` — set missing_fields
+    * `{:slug, binary | nil}` — set slug
+    * `{:deep_link, binary | nil}` — set deep_link
+    * `{:error, stage, class, reason}` — set error_stage/class/summary
+    * `{:clear_error}` — clear all error fields
+    * `{:retry_count, map}` — set retry_count
+    * `{:caption, binary}` — set caption
+    * `{:mode, atom}` — set mode
+    * `{:reset}` — clear stage, stages, recipe, verdict, missing_fields, slug, deep_link
+  """
+  def transition(job, changes) when is_list(changes) do
+    job =
+      Enum.reduce(changes, job, fn change, acc ->
+        validate_change!(acc, change)
+        apply_change(acc, change)
+      end)
+
+    job = %{job | updated_at: DateTime.utc_now()}
+    JobStore.put(job)
+    broadcast(job)
+    job
+  end
+
+  # Reject transitions that are obviously illegal — for example, leaving a
+  # terminal state. We log the violation but still apply the change so the
+  # retry / corruption-recovery paths keep working; loud logging is enough
+  # to catch programming mistakes during development.
+  defp validate_change!(job, {:state, new_state}) do
+    cond do
+      job.state == new_state ->
+        :ok
+
+      terminal?(job.state) and not terminal?(new_state) ->
+        Logger.error(
+          "[pipeline] job #{job.id} illegal state transition: leaving terminal #{job.state} -> #{new_state}"
+        )
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_change!(_job, _change), do: :ok
+
+  defp terminal?(:succeeded), do: true
+  defp terminal?(:failed), do: true
+  defp terminal?(:cancelled), do: true
+  defp terminal?(_), do: false
+
+  # Compute the wall-clock duration of a stage in milliseconds, or `nil` if
+  # the stage never started (e.g. `:skipped` or `:pending` without a prior
+  # `:running` transition).
+  defp stage_duration(job, stage) do
+    case Map.get(job.stage_started_at || %{}, stage) do
+      nil -> nil
+      started -> System.monotonic_time(:millisecond) - started
+    end
+  end
+
+  # Private change applicators
+  defp apply_change(job, {:state, new_state}) do
+    if job.state != new_state do
+      Logger.info("[pipeline] job #{job.id} state #{job.state || "nil"} -> #{new_state}")
+    end
+
+    if new_state in [:succeeded, :failed] do
+      :telemetry.execute(
+        [:insta_mealie, :pipeline, :job, :stop],
+        %{system_time: System.system_time()},
+        %{job_id: job.id, terminal_state: new_state, error_class: job.error_class}
+      )
+    end
+
+    %{job | state: new_state}
+  end
+
+  defp apply_change(job, {:stage, stage, :running}) do
+    old = Map.get(job.stages, stage)
+
+    if old != :running do
+      Logger.info("[pipeline] job #{job.id} #{stage} #{old || "nil"} -> running")
+    end
+
+    started_at =
+      (job.stage_started_at || %{})
+      |> Map.put(stage, System.monotonic_time(:millisecond))
+
+    :telemetry.execute(
+      [:insta_mealie, :pipeline, :stage, :start],
+      %{system_time: System.system_time()},
+      %{job_id: job.id, stage: stage}
+    )
+
+    %{
+      job
+      | stage: stage,
+        stages: Map.put(job.stages, stage, :running),
+        stage_started_at: started_at
+    }
+  end
+
+  defp apply_change(job, {:stage, stage, :failed}) do
+    old = Map.get(job.stages, stage)
+
+    if old != :failed do
+      Logger.info("[pipeline] job #{job.id} #{stage} #{old || "nil"} -> failed")
+    end
+
+    duration = stage_duration(job, stage)
+
+    :telemetry.execute(
+      [:insta_mealie, :pipeline, :stage, :exception],
+      %{duration: duration, system_time: System.system_time()},
+      %{job_id: job.id, stage: stage, error_class: job.error_class}
+    )
+
+    %{job | stage: stage, stages: Map.put(job.stages, stage, :failed)}
+  end
+
+  defp apply_change(job, {:stage, stage, status}) when status in [:done, :skipped, :pending] do
+    old = Map.get(job.stages, stage)
+
+    if old != status do
+      Logger.info("[pipeline] job #{job.id} #{stage} #{old || "nil"} -> #{status}")
+    end
+
+    duration = stage_duration(job, stage)
+
+    :telemetry.execute(
+      [:insta_mealie, :pipeline, :stage, :stop],
+      %{duration: duration, system_time: System.system_time()},
+      %{job_id: job.id, stage: stage, status: status}
+    )
+
+    %{job | stage: stage, stages: Map.put(job.stages, stage, status)}
+  end
+
+  defp apply_change(job, {:recipe, recipe}), do: %{job | recipe: recipe}
+  defp apply_change(job, {:verdict, verdict}), do: %{job | verdict: verdict}
+  defp apply_change(job, {:missing_fields, fields}), do: %{job | missing_fields: fields}
+  defp apply_change(job, {:slug, slug}), do: %{job | slug: slug}
+  defp apply_change(job, {:deep_link, link}), do: %{job | deep_link: link}
+  defp apply_change(job, {:retry_count, count}), do: %{job | retry_count: count}
+  defp apply_change(job, {:caption, caption}), do: %{job | caption: caption}
+  defp apply_change(job, {:mode, mode}), do: %{job | mode: mode}
+
+  defp apply_change(job, {:error, stage, class, reason}) do
+    Logger.error("[pipeline] job #{job.id} failed at #{stage} (#{class}: #{reason})")
+
+    :telemetry.execute(
+      [:insta_mealie, :pipeline, :failure],
+      %{count: 1},
+      %{job_id: job.id, stage: stage, error_class: class}
+    )
+
+    job
+    |> Map.put(:error_stage, stage)
+    |> Map.put(:error_class, class)
+    |> Map.put(:error_summary, to_string(reason))
+  end
+
+  defp apply_change(job, {:clear_error}) do
+    %{job | error_stage: nil, error_class: nil, error_summary: nil}
+  end
+
+  defp apply_change(job, {:reset}) do
+    %{
+      job
+      | stage: nil,
+        stages: %{},
+        recipe: nil,
+        verdict: nil,
+        missing_fields: nil,
+        slug: nil,
+        deep_link: nil
+    }
+  end
+
   # ---- internals ----
 
-  defp run_import_inline(job) do
-    recipe = job.recipe || %{}
+  @doc """
+  Execute the Mealie import for a job whose recipe is ready, persisting the
+  result to ETS and broadcasting the update. Returns `{:ok, updated_job}` on
+  success or `{:error, class, reason}` on failure.
 
-    case InstaMealie.Mealie.import_recipe(recipe) do
+  This is the canonical import entrypoint. The GenServer (via
+  `InstaMealie.Pipeline.Job.run_import/1`) delegates here after setting the
+  `:mealie_import` stage to `:running`. The post-review path
+  (`apply_ingredient_resolutions/2`) also calls this function after
+  pre-setting the stage. Callers MUST set the stage to `:running` before
+  calling; this function sets `:done` on success or `:failed` on error.
+  """
+  @spec run_import_inline(Job.t()) :: {:ok, Job.t()} | {:error, atom(), term()}
+  def run_import_inline(job) do
+    recipe = job.recipe || Recipe.empty()
+
+    case InstaMealie.Mealie.import_recipe(recipe, job.slug) do
       {:ok, slug, deep_link} ->
         updated =
-          %{
-            job
-            | state: :succeeded,
-              slug: slug,
-              deep_link: deep_link,
-              stages: Map.put(job.stages, :mealie_import, :done),
-              updated_at: DateTime.utc_now()
-          }
+          transition(job, [
+            {:state, :succeeded},
+            {:slug, slug},
+            {:deep_link, deep_link},
+            {:clear_error},
+            {:stage, :mealie_import, :done}
+          ])
 
-        JobStore.put(updated)
-        broadcast(updated)
         {:ok, updated}
 
       {:error, class, reason} ->
-        updated =
-          %{
-            job
-            | state: :failed,
-              error_stage: :mealie_import,
-              error_class: class,
-              error_summary: to_string(reason),
-              updated_at: DateTime.utc_now()
-          }
+        transition(job, [
+          {:state, :failed},
+          {:error, :mealie_import, class, reason},
+          {:stage, :mealie_import, :failed}
+        ])
 
-        JobStore.put(updated)
-        broadcast(updated)
         {:error, class, reason}
     end
   end
 
-  defp stop_job(job_id) do
-    case Registry.lookup(__MODULE__.Registry, job_id) do
-      [{pid, _}] -> DynamicSupervisor.terminate_child(JobSupervisor, pid)
-      [] -> :ok
+  defp normalize_url(nil), do: nil
+
+  defp normalize_url(url) when is_binary(url) do
+    uri = URI.parse(url)
+    # Strip query string and fragment
+    normalized = %{uri | query: nil, fragment: nil}
+    # Strip trailing slash from path
+    path = String.trim_trailing(normalized.path || "", "/")
+    normalized = %{normalized | path: if(path == "", do: "/", else: path)}
+    URI.to_string(normalized) |> String.trim_trailing("/")
+  end
+
+  defp check_duplicate_url(nil, _force), do: :ok
+  defp check_duplicate_url(_url, true), do: :ok
+
+  defp check_duplicate_url(normalized_url, false) do
+    existing =
+      JobStore.list()
+      |> Enum.find(fn job -> job.url && normalize_url(job.url) == normalized_url end)
+
+    if existing do
+      Logger.warning(
+        "[pipeline] duplicate URL detected, existing job #{existing.id}"
+      )
+
+      {:error, :duplicate_url, existing.id}
+    else
+      :ok
     end
   end
 

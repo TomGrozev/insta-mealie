@@ -2,11 +2,22 @@ defmodule InstaMealie.YtDlp.Cli do
   @moduledoc """
   Real yt-dlp wrapper invoked via `System.cmd` (ADR 0002).
 
-  `fetch/2` downloads a reel to a per-call temp dir as an mp4 plus an
-  info-json and a thumbnail, parses the metadata, and returns the
-  caption/author/comments. Fetch failures are classified into the standard
-  verdict vocabulary (extraction | rate_limited | cookie_expired | network |
-  ip_banned).
+  Two-stage fetch contract:
+
+    * **Stage 1 — `fetch_metadata/2`** runs yt-dlp with `--skip-download`,
+      `--write-info-json`, `--write-comments`, and `--write-thumbnail` to
+      collect author, caption, comments, and thumbnail path without
+      downloading media. Returns an internal `:fetch_dir` key for the later
+      audio request.
+
+    * **Stage 2 — `fetch_audio/2`** runs yt-dlp with
+      `--extract-audio --audio-format mp3 --audio-quality 64K` to download
+      audio into the per-fetch directory and returns `%{audio_path: path}`.
+
+  Both return `{:ok, map()} | {:error, atom(), term()}`.
+
+  Fetch failures are classified into the standard verdict vocabulary
+  (extraction | rate_limited | cookie_expired | network | ip_banned).
 
   Boot preflight (`preflight!/0`) verifies yt-dlp presence, version, and
   impersonation support, caching the result in `:persistent_term`.
@@ -18,22 +29,64 @@ defmodule InstaMealie.YtDlp.Cli do
   @min_version {2026, 7, 4}
   @preflight_key :insta_mealie_ytdlp_preflight
 
-  # ---- fetch ----
+  # ---- fetch_metadata ----
 
   @impl true
-  def fetch(url, opts \\ []) when is_binary(url) do
+  def fetch_metadata(url, opts \\ []) when is_binary(url) do
     case System.find_executable("yt-dlp") do
       nil ->
         {:error, :extraction, "yt-dlp binary not found on PATH"}
 
       ytdlp ->
+        host = url |> URI.parse() |> Map.get(:host, "unknown")
         dir = temp_dir!()
         out_tmpl = Path.join(dir, "reel.%(ext)s")
-        args = build_fetch_args(out_tmpl) |> maybe_add_cookies(opts)
+        args = build_metadata_args(out_tmpl) |> maybe_add_cookies(opts)
+        start = System.monotonic_time(:millisecond)
 
         case System.cmd(ytdlp, args ++ [url], stderr_to_stdout: true) do
-          {_out, 0} -> parse_fetch_result(dir)
-          {stderr, _code} -> {:error, classify_fetch_error(stderr), sanitize(stderr)}
+          {_out, 0} ->
+            elapsed = System.monotonic_time(:millisecond) - start
+            Logger.info("[ytdlp] metadata #{host} completed in #{elapsed}ms")
+            parse_metadata_result(dir)
+
+          {stderr, _code} ->
+            elapsed = System.monotonic_time(:millisecond) - start
+            class = classify_fetch_error(stderr)
+            Logger.error("[ytdlp] metadata #{host} failed in #{elapsed}ms (#{class})")
+            {:error, class, sanitize(stderr)}
+        end
+    end
+  rescue
+    e in RuntimeError -> {:error, :extraction, Exception.message(e)}
+  end
+
+  # ---- fetch_audio ----
+
+  @impl true
+  def fetch_audio(url, opts \\ []) when is_binary(url) do
+    case System.find_executable("yt-dlp") do
+      nil ->
+        {:error, :extraction, "yt-dlp binary not found on PATH"}
+
+      ytdlp ->
+        host = url |> URI.parse() |> Map.get(:host, "unknown")
+        dir = opts[:output_dir] || temp_dir!()
+        out_tmpl = Path.join(dir, "reel.%(ext)s")
+        args = build_audio_args(out_tmpl) |> maybe_add_cookies(opts)
+        start = System.monotonic_time(:millisecond)
+
+        case System.cmd(ytdlp, args ++ [url], stderr_to_stdout: true) do
+          {_out, 0} ->
+            elapsed = System.monotonic_time(:millisecond) - start
+            Logger.info("[ytdlp] audio #{host} completed in #{elapsed}ms")
+            parse_audio_result(dir)
+
+          {stderr, _code} ->
+            elapsed = System.monotonic_time(:millisecond) - start
+            class = classify_fetch_error(stderr)
+            Logger.error("[ytdlp] audio #{host} failed in #{elapsed}ms (#{class})")
+            {:error, class, sanitize(stderr)}
         end
     end
   rescue
@@ -102,21 +155,35 @@ defmodule InstaMealie.YtDlp.Cli do
   # ---- internals (exposed for unit tests) ----
 
   @doc false
-  def build_fetch_args(out_tmpl) do
+  def build_metadata_args(out_tmpl) do
     [
       "--no-playlist",
       "--no-warnings",
       "--quiet",
       "--no-simulate",
+      "--skip-download",
       "--write-info-json",
-      "--write-thumbnail",
       "--write-comments",
-      "--remux-video",
-      "mp4",
-      "--merge-output-format",
-      "mp4",
+      "--write-thumbnail",
+      "-o",
+      out_tmpl
+    ]
+  end
+
+  @doc false
+  def build_audio_args(out_tmpl) do
+    [
+      "--no-playlist",
+      "--no-warnings",
+      "--quiet",
+      "--no-simulate",
+      "--extract-audio",
+      "--audio-format",
+      "mp3",
+      "--audio-quality",
+      "64K",
       "-f",
-      "bestvideo+bestaudio/best",
+      "bestaudio/best",
       "-o",
       out_tmpl
     ]
@@ -207,7 +274,7 @@ defmodule InstaMealie.YtDlp.Cli do
     dir
   end
 
-  defp parse_fetch_result(dir) do
+  defp parse_metadata_result(dir) do
     info_path = Path.wildcard(Path.join(dir, "*.info.json")) |> List.first()
     unless info_path, do: raise("yt-dlp produced no info json")
 
@@ -236,27 +303,26 @@ defmodule InstaMealie.YtDlp.Cli do
           []
       end
 
-    video_path =
-      Path.wildcard(Path.join(dir, "*.mp4")) |> List.first() ||
-        Path.wildcard(Path.join(dir, "*.mkv")) |> List.first() ||
-        Path.wildcard(Path.join(dir, "*.webm")) |> List.first()
-
     thumbnail_path =
       Path.wildcard(Path.join(dir, "*.jpg")) |> List.first() ||
         Path.wildcard(Path.join(dir, "*.jpeg")) |> List.first() ||
         Path.wildcard(Path.join(dir, "*.webp")) |> List.first() ||
         Path.wildcard(Path.join(dir, "*.png")) |> List.first()
 
-    unless video_path, do: raise("yt-dlp produced no video file")
-
     {:ok,
      %{
        author: author,
        caption: caption,
        comments: comments,
-       video_path: video_path,
-       thumbnail_path: thumbnail_path
+       thumbnail_path: thumbnail_path,
+       fetch_dir: dir
      }}
+  end
+
+  defp parse_audio_result(dir) do
+    audio_path = Path.wildcard(Path.join(dir, "*.mp3")) |> List.first()
+    unless audio_path, do: raise("yt-dlp produced no audio file")
+    {:ok, %{audio_path: audio_path}}
   end
 
   defp sanitize(stderr) when byte_size(stderr) > 800 do

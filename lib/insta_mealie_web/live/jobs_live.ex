@@ -37,6 +37,7 @@ defmodule InstaMealieWeb.JobsLive do
     else
       case Pipeline.create_job(%{url: url}) do
         {:ok, _id} -> {:noreply, assign(socket, :form_error, nil)}
+        {:ok, _id, _position} -> {:noreply, assign(socket, :form_error, nil)}
         {:error, _} -> {:noreply, assign(socket, :form_error, "Could not start the job.")}
       end
     end
@@ -52,6 +53,7 @@ defmodule InstaMealieWeb.JobsLive do
     else
       case Pipeline.create_job(%{caption: caption}) do
         {:ok, _id} -> {:noreply, assign(socket, :form_error, nil)}
+        {:ok, _id, _position} -> {:noreply, assign(socket, :form_error, nil)}
         {:error, _} -> {:noreply, assign(socket, :form_error, "Could not start the job.")}
       end
     end
@@ -80,6 +82,16 @@ defmodule InstaMealieWeb.JobsLive do
   def handle_event("transcribe-anyway", %{"job-id" => job_id}, socket) do
     Pipeline.apply_transcribe_anyway(job_id)
     {:noreply, socket}
+  end
+
+  def handle_event("cancel_job", %{"job_id" => job_id}, socket) do
+    case Pipeline.cancel_job(job_id) do
+      {:ok, _} ->
+        {:noreply, socket}
+
+      {:error, _} ->
+        {:noreply, socket |> put_flash(:error, "Could not cancel job")}
+    end
   end
 
   @impl true
@@ -288,6 +300,20 @@ defmodule InstaMealieWeb.JobsLive do
         <.pipeline_strip stages={@job.stages} />
       </div>
 
+      <%= if @job.state not in [:succeeded, :failed, :cancelled, :queued] do %>
+        <div class="mt-2 flex justify-end">
+          <button
+            id={"cancel-#{@job.id}"}
+            type="button"
+            phx-click="cancel_job"
+            phx-value-job_id={@job.id}
+            class="rounded-lg border border-base-300 bg-base-100 px-3 py-1.5 text-sm font-medium text-error transition hover:bg-error/10 active:scale-[0.98]"
+          >
+            Cancel
+          </button>
+        </div>
+      <% end %>
+
       <%= if @job.state == :failed do %>
         <div class="mt-3">
           <div class={[
@@ -412,7 +438,7 @@ defmodule InstaMealieWeb.JobsLive do
       {:mealie_import, :validation} -> false
       {:fetch, :ip_banned} -> false
       {:llm_format, :incomplete_caption} -> false
-      {:mealie_import, class} -> class in [:network, :auth]
+      {:mealie_import, class} -> class in [:network, :auth, :api_error]
       {stage, _class} when stage in [:fetch, :transcribe, :llm_format, :llm_merge] -> true
       _ -> false
     end
@@ -426,7 +452,8 @@ defmodule InstaMealieWeb.JobsLive do
 
   defp show_paste_caption?(job), do: job.error_stage == :fetch
 
-  defp show_transcribe_anyway?(job), do: job.error_stage in [:transcribe, :llm_merge]
+  defp show_transcribe_anyway?(job),
+    do: job.error_stage in [:transcribe, :llm_merge] and job.mode == :url
 
   defp dead_row?(job), do: job.error_stage == :mealie_import and job.error_class == :validation
 
@@ -512,7 +539,7 @@ defmodule InstaMealieWeb.JobsLive do
   defp verdict_text(%{state: :succeeded}), do: "Imported to Mealie"
   defp verdict_text(%{state: :needs_review}), do: "Needs ingredient review"
   defp verdict_text(%{state: :failed}), do: "Failed"
-  defp verdict_text(%{transcribe_anyway: true}), do: "Importing caption-only recipe…"
+  defp verdict_text(%{mode: :skip_audio}), do: "Importing caption-only recipe…"
   defp verdict_text(%{state: :created}), do: "Queued"
   defp verdict_text(%{state: :caption_pasting}), do: "Awaiting caption"
   defp verdict_text(_), do: "Working…"

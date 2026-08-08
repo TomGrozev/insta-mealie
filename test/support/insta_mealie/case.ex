@@ -43,12 +43,13 @@ defmodule InstaMealie.TestCase do
     Mox.set_mox_global()
 
     InstaMealie.Pipeline.JobStore.clear()
+    InstaMealie.Pipeline.JobAdmission.reset()
 
     # Set YtDlp to Mock (the only behaviour left with Mox)
     Application.put_env(:insta_mealie, InstaMealie.YtDlp, InstaMealie.YtDlp.Mock)
 
-    # Register default YtDlp mock stub
-    Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+    # Register default YtDlp mock stubs (two-stage fetch contract)
+    Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
       {:ok,
        %{
          author: "chef_og",
@@ -58,12 +59,16 @@ defmodule InstaMealie.TestCase do
            %{author: "random_fan", text: "tried this, loved it"},
            %{author: "chef_og", text: "Tip: use parchment paper."}
          ],
-         video_path: "/tmp/insta_mealie/x.mp4"
+         fetch_dir: "/tmp/insta_mealie/fetch_default"
        }}
     end)
 
+    Mox.stub(InstaMealie.YtDlp.Mock, :fetch_audio, fn _url, _opts ->
+      {:ok, %{audio_path: "/tmp/insta_mealie/x.mp3"}}
+    end)
+
     # Default adapter stubs for LLM, Whisper, and Mealie
-    Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+    Application.put_env(:insta_mealie, :llm_http_adapter, fn _model, _body ->
       {:ok,
        %{
          "choices" => [
@@ -82,11 +87,10 @@ defmodule InstaMealie.TestCase do
     end)
 
     Application.put_env(:insta_mealie, :whisper_http_adapter, fn _ ->
-      {:ok,
-       "Transcribed audio: mix oats almonds syrup oil salt, bake at 160C for 40 minutes."}
+      {:ok, "Transcribed audio: mix oats almonds syrup oil salt, bake at 160C for 40 minutes."}
     end)
 
-    Application.put_env(:insta_mealie, :mealie_http_adapter, fn %{method: m, path: p, body: body} ->
+    Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, body ->
       cond do
         m == :post and p == "/api/recipes" ->
           slug =
@@ -109,18 +113,21 @@ defmodule InstaMealie.TestCase do
           {:ok, %{"data" => []}}
 
         m == :post and p == "/api/parser/ingredients" ->
-          ingredients = if is_list(body), do: body, else: []
+          ingredients = body["ingredients"] || []
 
           parsed =
             Enum.map(ingredients, fn ingredient ->
+              name = if is_binary(ingredient), do: ingredient, else: ingredient["text"] || "unknown"
+
               %{
-                "quantity" => nil,
-                "unit" => %{"name" => nil},
+                "quantity" => 1.0,
+                "unit" => %{"name" => "cup", "id" => "stub-unit"},
                 "food" => %{
-                  "name" => ingredient["text"] || "unknown",
+                  "name" => name,
                   "id" => "stub-food",
                   "confidence" => 1.0
                 },
+                "confidence" => %{"food" => 1.0, "unit" => 1.0, "quantity" => 1.0, "average" => 1.0},
                 "note" => nil
               }
             end)

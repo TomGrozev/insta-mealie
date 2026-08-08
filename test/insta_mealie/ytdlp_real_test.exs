@@ -112,4 +112,71 @@ defmodule InstaMealie.YtDlp.CliTest do
       end
     end
   end
+
+  describe "build_metadata_args/1" do
+    test "includes --skip-download and info/comments/thumbnail flags" do
+      args = Cli.build_metadata_args("/tmp/out.%(ext)s")
+      assert "--skip-download" in args
+      assert "--write-info-json" in args
+      assert "--write-comments" in args
+      assert "--write-thumbnail" in args
+    end
+
+    test "does not include audio extraction or video remux flags" do
+      args = Cli.build_metadata_args("/tmp/out.%(ext)s")
+      refute "--extract-audio" in args
+      refute "--audio-format" in args
+      refute "--audio-quality" in args
+    end
+
+    test "does not include -f (format selection)" do
+      args = Cli.build_metadata_args("/tmp/out.%(ext)s")
+      refute "-f" in args
+    end
+
+    test "includes -o with the output template" do
+      args = Cli.build_metadata_args("/tmp/out.%(ext)s")
+      o_idx = Enum.find_index(args, &(&1 == "-o"))
+      assert o_idx
+      assert Enum.at(args, o_idx + 1) == "/tmp/out.%(ext)s"
+    end
+  end
+
+  describe "build_audio_args/1" do
+    test "includes --extract-audio, mp3, 64K, and bestaudio/best" do
+      args = Cli.build_audio_args("/tmp/out.%(ext)s")
+      assert "--extract-audio" in args
+      audio_fmt_idx = Enum.find_index(args, &(&1 == "--audio-format"))
+      assert audio_fmt_idx
+      assert Enum.at(args, audio_fmt_idx + 1) == "mp3"
+
+      audio_q_idx = Enum.find_index(args, &(&1 == "--audio-quality"))
+      assert audio_q_idx
+      assert Enum.at(args, audio_q_idx + 1) == "64K"
+
+      f_idx = Enum.find_index(args, &(&1 == "-f"))
+      assert f_idx
+      assert Enum.at(args, f_idx + 1) == "bestaudio/best"
+    end
+
+    test "does not include metadata-write or skip-download flags" do
+      args = Cli.build_audio_args("/tmp/out.%(ext)s")
+      refute "--skip-download" in args
+      refute "--write-info-json" in args
+      refute "--write-comments" in args
+      refute "--write-thumbnail" in args
+    end
+
+    test "does not include video remux flags" do
+      args = Cli.build_audio_args("/tmp/out.%(ext)s")
+      refute "--remux-video" in args
+    end
+
+    test "includes -o with the output template" do
+      args = Cli.build_audio_args("/tmp/out.%(ext)s")
+      o_idx = Enum.find_index(args, &(&1 == "-o"))
+      assert o_idx
+      assert Enum.at(args, o_idx + 1) == "/tmp/out.%(ext)s"
+    end
+  end
 end

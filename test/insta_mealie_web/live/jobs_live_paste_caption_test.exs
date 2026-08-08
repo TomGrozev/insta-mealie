@@ -24,7 +24,7 @@ defmodule InstaMealieWeb.JobsLivePasteCaptionTest do
     test "paste-caption textarea submits and the job succeeds via caption-only routing" do
       {id, _} =
         start_failed_job(fn ->
-          Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+          Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
             {:error, :network, "could not reach instagram"}
           end)
         end)
@@ -60,7 +60,7 @@ defmodule InstaMealieWeb.JobsLivePasteCaptionTest do
     test "ip_banned fetch failure offers paste-only (no Retry) and still imports on paste" do
       {id, _} =
         start_failed_job(fn ->
-          Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+          Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
             {:error, :ip_banned, "ip address banned by instagram"}
           end)
         end)

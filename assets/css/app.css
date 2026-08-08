@@ -108,4 +108,8 @@
 /* Make LiveView wrapper divs transparent for layout */
 [data-phx-session], [data-phx-teleported-src] { display: contents }
 
+/* Native disclosure details/summary markers */
+details > summary { list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+
 /* This file is for your main application CSS */

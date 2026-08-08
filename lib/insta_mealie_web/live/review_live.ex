@@ -4,6 +4,8 @@ defmodule InstaMealieWeb.ReviewLive do
   alias InstaMealie.Pipeline
   alias InstaMealie.PubSub
 
+  @confidence_threshold Application.compile_env(:insta_mealie, :insta_mealie, [])[:ingredient_confidence_threshold] || 0.85
+
   @impl true
   def mount(%{"id" => id}, _session, socket) do
     if connected?(socket), do: Phoenix.PubSub.subscribe(PubSub, "jobs")
@@ -18,29 +20,44 @@ defmodule InstaMealieWeb.ReviewLive do
           |> assign(:not_reviewable, true)
 
         true ->
-          ingredients = get_in(job.review, [:ingredients]) || []
-          unknown = Enum.filter(ingredients, & &1.unknown)
+          ingredients =
+            (job.recipe && job.recipe.ingredients || [])
+            |> Enum.filter(&(&1.status == :needs_review))
 
-          {food_candidates, unit_candidates} =
-            Enum.reduce(unknown, {%{}, %{}}, fn ing, {fc, uc} ->
-              guess = ing.food || ing.raw || ""
-              food_cands = search_foods_safe(guess)
-              unit_cands = search_units_safe(guess)
-              {Map.put(fc, ing.index, food_cands), Map.put(uc, ing.index, unit_cands)}
+          {food_candidates, unit_candidates, selected_food, selected_unit, food_terms, unit_terms} =
+            Enum.reduce(ingredients, {%{}, %{}, %{}, %{}, %{}, %{}}, fn ing, acc ->
+              {fc, uc, sf, su, ft, ut} = acc
+              i = ing.index
+
+              food_term = ing.food || ing.raw || ""
+              unit_term = ing.unit || ""
+
+              food_cands = source_food_suggestions(food_term)
+              unit_cands = source_unit_suggestions(unit_term)
+
+              {
+                Map.put(fc, i, food_cands),
+                Map.put(uc, i, unit_cands),
+                Map.put(sf, i, initial_food_value(ing, food_cands)),
+                Map.put(su, i, initial_unit_value(ing, unit_cands)),
+                Map.put(ft, i, ""),
+                Map.put(ut, i, "")
+              }
             end)
-
-          all_foods = search_foods_safe("")
-          all_units = search_units_safe("")
 
           socket
           |> assign(:job, job)
           |> assign(:not_reviewable, false)
-          |> assign(:recipe_name, job.recipe["name"])
+          |> assign(:recipe_name, job.recipe && job.recipe.name)
           |> assign(:ingredients, ingredients)
           |> assign(:food_candidates, food_candidates)
           |> assign(:unit_candidates, unit_candidates)
-          |> assign(:all_foods, all_foods)
-          |> assign(:all_units, all_units)
+          |> assign(:food_search_results, %{})
+          |> assign(:unit_search_results, %{})
+          |> assign(:food_search_terms, food_terms)
+          |> assign(:unit_search_terms, unit_terms)
+          |> assign(:selected_food, selected_food)
+          |> assign(:selected_unit, selected_unit)
           |> assign(:imported, false)
           |> assign(:dead, false)
           |> assign(:import_error, nil)
@@ -54,29 +71,25 @@ defmodule InstaMealieWeb.ReviewLive do
   def handle_event("import", params, socket) do
     job = socket.assigns.job
     ingredients = socket.assigns.ingredients
-    unknown = Enum.filter(ingredients, & &1.unknown)
 
-    # The form uses as: :review, so real browser submits nest under "review".
-    # Fall back to flat params for tests that call handle_event directly.
     review_params = Map.get(params, "review", params)
 
     resolutions =
-      Enum.reduce(unknown, %{}, fn ing, acc ->
+      Enum.reduce(ingredients, %{}, fn ing, acc ->
         i = ing.index
-        selected_food = review_params["food_#{i}"] || ""
-        selected_unit = review_params["unit_#{i}"] || ""
+        food = String.trim(review_params["food_#{i}"] || "")
+        unit = String.trim(review_params["unit_#{i}"] || "")
 
-        food =
-          if selected_food == "__custom__",
-            do: String.trim(review_params["custom_food_#{i}"] || ""),
-            else: selected_food
+        changed = food != initial_food(ing) or unit != initial_unit(ing)
 
-        unit =
-          if selected_unit == "__custom__",
-            do: String.trim(review_params["custom_unit_#{i}"] || ""),
-            else: selected_unit
+        include =
+          if ing.status == :needs_review do
+            food != "" or unit != ""
+          else
+            changed
+          end
 
-        if food != "" or unit != "" do
+        if include do
           Map.put(acc, i, %{"food" => food, "unit" => unit})
         else
           acc
@@ -103,26 +116,75 @@ defmodule InstaMealieWeb.ReviewLive do
     end
   end
 
-  def handle_event("search-food", %{"index" => index, "term" => term}, socket) do
-    idx = String.to_integer(index)
-    candidates = search_foods_safe(term)
+  def handle_event("select-option", params, socket) do
+    field = review_param(params, "field")
 
-    socket =
-      socket
-      |> assign(:food_candidates, Map.put(socket.assigns.food_candidates, idx, candidates))
+    with {:ok, index} <- resolve_index(params, field),
+         value = review_param(params, "value") do
+      socket =
+        case field do
+          "food" ->
+            assign(
+              socket,
+              :selected_food,
+              Map.put(socket.assigns.selected_food, index, value)
+            )
 
-    {:noreply, socket}
+          "unit" ->
+            assign(
+              socket,
+              :selected_unit,
+              Map.put(socket.assigns.selected_unit, index, value)
+            )
+
+          _ ->
+            socket
+        end
+
+      {:noreply, socket}
+    else
+      :error -> {:noreply, socket}
+    end
   end
 
-  def handle_event("search-unit", %{"index" => index, "term" => term}, socket) do
-    idx = String.to_integer(index)
-    candidates = search_units_safe(term)
+  def handle_event("search-food", params, socket) do
+    with {:ok, index} <- resolve_index(params, "food"),
+         term = review_param(params, "food_#{index}") || "" do
+      results = search_foods_safe(term)
 
-    socket =
-      socket
-      |> assign(:unit_candidates, Map.put(socket.assigns.unit_candidates, idx, candidates))
+      socket =
+        socket
+        |> assign(:selected_food, Map.put(socket.assigns.selected_food, index, term))
+        |> assign(:food_search_terms, Map.put(socket.assigns.food_search_terms, index, term))
+        |> assign(
+          :food_search_results,
+          Map.put(socket.assigns.food_search_results, index, results)
+        )
 
-    {:noreply, socket}
+      {:noreply, socket}
+    else
+      :error -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("search-unit", params, socket) do
+    with {:ok, index} <- resolve_index(params, "unit"),
+         term = review_param(params, "unit_#{index}") || "" do
+      results = search_units_safe(term)
+
+      socket =
+        socket
+        |> assign(:selected_unit, Map.put(socket.assigns.selected_unit, index, term))
+        |> assign(:unit_search_terms, Map.put(socket.assigns.unit_search_terms, index, term))
+        |> assign(
+          :unit_search_results,
+          Map.put(socket.assigns.unit_search_results, index, results)
+        )
+
+      {:noreply, socket}
+    else
+      :error -> {:noreply, socket}
+    end
   end
 
   def handle_event("retry-review", _params, socket) do
@@ -130,7 +192,6 @@ defmodule InstaMealieWeb.ReviewLive do
 
     case Pipeline.retry(job.id) do
       {:ok, _id} ->
-        # Pipeline.retry may re-fire import inline. Get the updated job.
         updated_job = Pipeline.get_job(job.id)
 
         socket =
@@ -164,6 +225,99 @@ defmodule InstaMealieWeb.ReviewLive do
         {:noreply, socket}
     end
   end
+
+  defp review_param(params, key, fallback \\ "") do
+    nested = get_in(params, ["review", key])
+
+    if is_nil(nested) or nested == "" do
+      Map.get(params, key, fallback)
+    else
+      nested
+    end
+  end
+
+  defp resolve_index(params, field) when is_map(params) do
+    with :error <- resolve_explicit_index(params),
+         :error <- resolve_field_key_index(params, field),
+         :error <- resolve_target_index(params) do
+      :error
+    end
+  end
+
+  defp resolve_index(_, _), do: :error
+
+  defp resolve_explicit_index(params) when is_map(params) do
+    parse_index_value(params["index"] || get_in(params, ["review", "index"]))
+  end
+
+  defp resolve_explicit_index(_), do: :error
+
+  defp resolve_field_key_index(params, field) when is_binary(field) do
+    prefix = "#{field}_"
+    nested = get_in(params, ["review"]) || %{}
+
+    find_field_key(params, prefix)
+    |> Kernel.||(find_field_key(nested, prefix))
+    |> case do
+      nil -> :error
+      key -> parse_numeric_suffix(key, prefix)
+    end
+  end
+
+  defp resolve_field_key_index(_params, _field), do: :error
+
+  defp find_field_key(map, prefix) when is_map(map) do
+    Enum.find(Map.keys(map), fn key -> is_binary(key) && String.starts_with?(key, prefix) end)
+  end
+
+  defp find_field_key(_, _), do: nil
+
+  defp parse_numeric_suffix(key, prefix) when is_binary(key) do
+    suffix = String.replace_prefix(key, prefix, "")
+    parse_index_value(suffix)
+  end
+
+  defp resolve_target_index(params) when is_map(params) do
+    target = params["_target"] || get_in(params, ["review", "_target"])
+    parse_target(target)
+  end
+
+  defp resolve_target_index(_), do: :error
+
+  defp parse_target(target) when is_binary(target) do
+    target
+    |> String.split(~r/[\[\]]/)
+    |> Enum.reject(&(&1 == ""))
+    |> List.last()
+    |> parse_index_from_key()
+  end
+
+  defp parse_target(target) when is_list(target) do
+    target
+    |> List.last()
+    |> parse_index_from_key()
+  end
+
+  defp parse_target(_), do: :error
+
+  defp parse_index_from_key(key) when is_binary(key) do
+    case Regex.run(~r/(\d+)$/, key) do
+      [_, num] -> parse_index_value(num)
+      _ -> :error
+    end
+  end
+
+  defp parse_index_from_key(_), do: :error
+
+  defp parse_index_value(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {i, ""} -> {:ok, i}
+      _ -> :error
+    end
+  end
+
+  defp parse_index_value(value) when is_integer(value), do: {:ok, value}
+  defp parse_index_value(_), do: :error
 
   @impl true
   def handle_info({:job_updated, %InstaMealie.Pipeline.Job{} = job}, socket) do
@@ -258,168 +412,153 @@ defmodule InstaMealieWeb.ReviewLive do
                   as={:review}
                   class="space-y-4"
                 >
-                  <%= for ing <- Enum.filter(@ingredients, & &1.unknown) do %>
-                    <div class="rounded-2xl border border-base-300 bg-base-100 p-4 shadow-sm space-y-3">
-                      <div class="flex items-center gap-2">
-                        <span class="text-sm font-medium text-base-content">{ing.raw}</span>
-                        <span class={confidence_badge(ing.food_confidence)}>
-                          {confidence_label(ing.food_confidence)}
-                        </span>
-                      </div>
+                  <%= for ing <- @ingredients do %>
+                    <details
+                      class="rounded-2xl border border-base-300 bg-base-100 shadow-sm group"
+                      open={ing.status == :needs_review}
+                    >
+                      <summary class="flex cursor-pointer flex-col gap-3 p-4 list-none sm:flex-row sm:items-start sm:justify-between">
+                        <div class="flex-1">
+                          <p class="text-xs font-semibold uppercase tracking-wide text-base-content/60">
+                            Source ingredient
+                          </p>
+                          <p class="mt-1 font-display text-base font-semibold text-base-content">
+                            {ing.raw}
+                          </p>
+                        </div>
+                        <div class="flex-1 sm:text-right">
+                          <p class="text-xs font-semibold uppercase tracking-wide text-base-content/60">
+                            Will import as
+                          </p>
+                          <div class="mt-1 inline-flex flex-wrap items-baseline gap-x-2 gap-y-1 sm:justify-end">
+                            <% parts =
+                              preview_parts(
+                                ing,
+                                @selected_food[ing.index],
+                                @selected_unit[ing.index]
+                              ) %>
+                            <%= if parts.quantity_unit != "" do %>
+                              <span class="rounded-md bg-base-300/50 px-1.5 py-0.5 font-mono text-sm text-base-content/70">
+                                {parts.quantity_unit}
+                              </span>
+                            <% end %>
+                            <span class="font-display text-sm font-semibold text-base-content">
+                              {parts.food}
+                            </span>
+                            <%= if parts.note != "" do %>
+                              <span class="text-sm text-base-content/50">
+                                , {parts.note}
+                              </span>
+                            <% end %>
+                            <span class={confidence_badge(ing.food_confidence)}>
+                              {confidence_percent_label(ing.food_confidence)}
+                            </span>
+                          </div>
+                        </div>
+                        <div class="self-end pt-0 sm:self-auto sm:pt-1">
+                          <.icon
+                            name="hero-chevron-down"
+                            class="size-4 text-base-content/50 transition-transform group-open:rotate-180"
+                          />
+                        </div>
+                      </summary>
 
-                      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <div>
-                          <label class="block text-xs font-medium text-base-content/60 mb-1">Food</label>
-                          <div class="space-y-1">
-                            <select
+                      <div class="border-t border-base-300/50 p-4 space-y-4">
+                        <div class="rounded-xl bg-base-200/50 p-3">
+                          <div class="flex items-start gap-3">
+                            <div class="flex-1">
+                              <p class="text-xs font-semibold uppercase tracking-wide text-base-content/60">
+                                Source ingredient
+                              </p>
+                              <p class="mt-1 font-display text-base font-semibold text-base-content">
+                                {ing.raw}
+                              </p>
+                            </div>
+                            <span class={confidence_badge(ing.food_confidence)}>
+                              {confidence_label(ing.food_confidence)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div class="space-y-2">
+                            <div>
+                              <label
+                                for={"food-#{ing.index}"}
+                                class="block text-sm font-medium text-base-content"
+                              >
+                                Food
+                              </label>
+                              <p class="mt-1 text-xs text-base-content/60">
+                                Choose a Mealie match from the dropdown, or type a custom food.
+                              </p>
+                            </div>
+
+                            <.combo_box
                               id={"food-#{ing.index}"}
-                              name={"food_#{ing.index}"}
-                              phx-hook=".ReviewSelect"
-                              data-index={ing.index}
-                              data-field="food"
-                              class="w-full rounded-lg border border-base-300 bg-base-100 px-3 py-2 text-sm text-base-content focus:border-primary focus:ring-2 focus:ring-primary/30"
-                            >
-                              <%= if food_cands = @food_candidates[ing.index] do %>
-                                <optgroup label="Suggested">
-                                  <%= for cand <- food_cands do %>
-                                    <option
-                                      value={cand}
-                                      selected={
-                                        not food_has_no_candates?(ing.index, @food_candidates) and
-                                          cand == ing.food
-                                      }
-                                    >
-                                      {cand}
-                                    </option>
-                                  <% end %>
-                                </optgroup>
-                              <% end %>
-                              <optgroup label="All foods">
-                                <%= for cand <- @all_foods do %>
-                                  <option
-                                    value={cand}
-                                    selected={
-                                      not food_has_no_candates?(ing.index, @food_candidates) and
-                                        cand == ing.food
-                                    }
-                                  >
-                                    {cand}
-                                  </option>
-                                <% end %>
-                              </optgroup>
-                              <option
-                                value="__custom__"
-                                selected={food_has_no_candates?(ing.index, @food_candidates)}
-                              >
-                                ➕ Custom…
-                              </option>
-                            </select>
-
-                            <input
-                              type="text"
-                              id={"custom-food-#{ing.index}"}
-                              name={"custom_food_#{ing.index}"}
-                              value={ing.food || ing.raw || ""}
-                              placeholder="Type custom food…"
-                              class={[
-                                "w-full rounded-lg border border-base-300 bg-base-100 px-3 py-2 text-sm text-base-content focus:border-primary focus:ring-2 focus:ring-primary/30",
-                                if(food_has_no_candates?(ing.index, @food_candidates),
-                                  do: "",
-                                  else: "hidden"
-                                )
-                              ]}
+                              field="food"
+                              index={ing.index}
+                              value={@selected_food[ing.index]}
+                              suggested={@food_candidates[ing.index] || []}
+                              search_results={@food_search_results[ing.index] || []}
+                              query={@food_search_terms[ing.index]}
+                              placeholder="Search Mealie foods or enter a custom food…"
+                              aria_label="Food used in the recipe"
+                              dropdown_aria_label="Show food options"
+                              empty_option={false}
                             />
                           </div>
-                        </div>
 
-                        <div>
-                          <label class="block text-xs font-medium text-base-content/60 mb-1">Unit</label>
-                          <div class="space-y-1">
-                            <select
+                          <div class="space-y-2">
+                            <div>
+                              <label
+                                for={"unit-#{ing.index}"}
+                                class="block text-sm font-medium text-base-content"
+                              >
+                                Unit
+                              </label>
+                              <p class="mt-1 text-xs text-base-content/60">
+                                Choose a unit from the dropdown, or leave it blank if the ingredient has no unit.
+                              </p>
+                            </div>
+
+                            <.combo_box
                               id={"unit-#{ing.index}"}
-                              name={"unit_#{ing.index}"}
-                              phx-hook=".ReviewSelect"
-                              data-index={ing.index}
-                              data-field="unit"
-                              class="w-full rounded-lg border border-base-300 bg-base-100 px-3 py-2 text-sm text-base-content focus:border-primary focus:ring-2 focus:ring-primary/30"
-                            >
-                              <%= if unit_cands = @unit_candidates[ing.index] do %>
-                                <optgroup label="Suggested">
-                                  <%= for cand <- unit_cands do %>
-                                    <option
-                                      value={cand}
-                                      selected={
-                                        not unit_has_no_candates?(ing.index, @unit_candidates) and
-                                          cand == ing.unit
-                                      }
-                                    >
-                                      {cand}
-                                    </option>
-                                  <% end %>
-                                </optgroup>
-                              <% end %>
-                              <optgroup label="All units">
-                                <%= for cand <- @all_units do %>
-                                  <option
-                                    value={cand}
-                                    selected={
-                                      not unit_has_no_candates?(ing.index, @unit_candidates) and
-                                        cand == ing.unit
-                                    }
-                                  >
-                                    {cand}
-                                  </option>
-                                <% end %>
-                              </optgroup>
-                              <option
-                                value="__custom__"
-                                selected={unit_has_no_candates?(ing.index, @unit_candidates)}
-                              >
-                                ➕ Custom…
-                              </option>
-                            </select>
-
-                            <input
-                              type="text"
-                              id={"custom-unit-#{ing.index}"}
-                              name={"custom_unit_#{ing.index}"}
-                              value={ing.unit || ""}
-                              placeholder="Type custom unit…"
-                              class={[
-                                "w-full rounded-lg border border-base-300 bg-base-100 px-3 py-2 text-sm text-base-content focus:border-primary focus:ring-2 focus:ring-primary/30",
-                                if(unit_has_no_candates?(ing.index, @unit_candidates),
-                                  do: "",
-                                  else: "hidden"
-                                )
-                              ]}
+                              field="unit"
+                              index={ing.index}
+                              value={@selected_unit[ing.index]}
+                              suggested={@unit_candidates[ing.index] || []}
+                              search_results={@unit_search_results[ing.index] || []}
+                              query={@unit_search_terms[ing.index]}
+                              placeholder="Search Mealie units or leave blank…"
+                              aria_label="Unit used in the recipe"
+                              dropdown_aria_label="Show unit options"
+                              empty_option={true}
+                              empty_label="No unit"
                             />
                           </div>
                         </div>
                       </div>
-
-                      <div class="text-xs text-base-content/50">
-                        → sends:
-                        <span id={"preview-#{ing.index}"} class="font-mono">{ing.food || ing.raw ||
-                          "?"} {ing.unit ||
-                          ""}</span>
-                      </div>
-                    </div>
+                    </details>
                   <% end %>
 
-                  <div class="flex gap-3 pt-2">
-                    <button
-                      type="submit"
-                      id="import-review-submit"
-                      class="rounded-xl bg-primary px-5 py-3 font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
-                    >
-                      Import to Mealie
-                    </button>
-                    <.link
-                      navigate={~p"/"}
-                      class="rounded-xl border border-base-300 bg-base-100 px-5 py-3 font-medium text-base-content transition hover:bg-base-200"
-                    >
-                      Cancel
-                    </.link>
+                  <div class="flex flex-col-reverse sm:flex-row items-start sm:items-center justify-between gap-4 pt-2">
+                    <div class="flex gap-3">
+                      <button
+                        type="submit"
+                        id="import-review-submit"
+                        class="rounded-xl bg-primary px-5 py-3 font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
+                      >
+                        Import to Mealie
+                      </button>
+                      <.link
+                        navigate={~p"/"}
+                        class="rounded-xl border border-base-300 bg-base-100 px-5 py-3 font-medium text-base-content transition hover:bg-base-200"
+                      >
+                        Cancel
+                      </.link>
+                    </div>
+                    <p class="text-sm text-base-content/60">{import_summary(@ingredients)}</p>
                   </div>
                 </.form>
               </div>
@@ -429,51 +568,280 @@ defmodule InstaMealieWeb.ReviewLive do
       <% end %>
     </Layouts.app>
 
-    <script :type={Phoenix.LiveView.ColocatedHook} name=".ReviewSelect">
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".ReviewCombo">
       export default {
         mounted() {
-          this.el.addEventListener("change", () => {
-            const val = this.el.value;
-            const idx = this.el.dataset.index;
-            const field = this.el.dataset.field;
-            const customInput = document.getElementById(`custom-${field}-${idx}`);
+          this.open = false;
+          this.button = this.el.querySelector("button");
 
-            if (val === "__custom__") {
-              if (customInput) {
-                customInput.classList.remove("hidden");
-                customInput.focus();
-              }
-            } else {
-              if (customInput) {
-                customInput.classList.add("hidden");
-              }
+          this.button.addEventListener("click", (e) => {
+            e.preventDefault();
+            this.open = !this.open;
+            this.toggle(this.open);
+            if (this.open) this.focusFirst();
+          });
+
+          this.el.addEventListener("input", (e) => {
+            if (!this.input().contains(e.target)) return;
+            this.open = true;
+            this.toggle(true);
+          });
+
+          this.el.addEventListener("keydown", (e) => {
+            const option = e.target.closest('[role="option"]');
+            if (option) {
+              this.handleOptionKeydown(e, option);
+            } else if (e.target === this.input()) {
+              this.handleInputKeydown(e);
             }
+          });
 
-            this.updatePreview(idx);
+          this.el.addEventListener("click", (e) => {
+            const option = e.target.closest('[role="option"]');
+            if (option) this.selectOption(option);
+          });
+
+          document.addEventListener("click", (e) => {
+            if (!this.el.contains(e.target) && this.open) {
+              this.open = false;
+              this.toggle(false);
+            }
           });
         },
 
-        updatePreview(idx) {
-          const foodSelect = document.getElementById(`food-${idx}`);
-          const unitSelect = document.getElementById(`unit-${idx}`);
-          const customFood = document.getElementById(`custom-food-${idx}`);
-          const customUnit = document.getElementById(`custom-unit-${idx}`);
-          const preview = document.getElementById(`preview-${idx}`);
+        updated() {
+          this.toggle(this.open);
+        },
 
-          if (!preview) return;
+        input() {
+          return this.el.querySelector("input");
+        },
 
-          const food = foodSelect && foodSelect.value === "__custom__"
-            ? (customFood ? customFood.value : "")
-            : (foodSelect ? foodSelect.value : "");
-          const unit = unitSelect && unitSelect.value === "__custom__"
-            ? (customUnit ? customUnit.value : "")
-            : (unitSelect ? unitSelect.value : "");
+        list() {
+          return this.el.querySelector('[role="listbox"]');
+        },
 
-          preview.textContent = `${food || "?"} ${unit || ""}`.trim();
+        toggle(open) {
+          const list = this.list();
+          if (!list) return;
+          list.classList.toggle("hidden", !open);
+          this.input().setAttribute("aria-expanded", open);
+        },
+
+        options() {
+          return Array.from(this.list().querySelectorAll('[role="option"]'));
+        },
+
+        selectOption(option) {
+          const input = this.input();
+          input.value = option.getAttribute("phx-value-value") ?? option.textContent.trim();
+          this.open = false;
+          this.toggle(false);
+          input.focus();
+        },
+
+        focusFirst() {
+          const opts = this.options();
+          if (opts.length) opts[0].focus();
+        },
+
+        focusLast() {
+          const opts = this.options();
+          if (opts.length) opts[opts.length - 1].focus();
+        },
+
+        handleInputKeydown(e) {
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            this.open = true;
+            this.toggle(true);
+            this.focusFirst();
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            this.open = true;
+            this.toggle(true);
+            this.focusLast();
+          } else if (e.key === "Enter" && this.open) {
+            e.preventDefault();
+            const first = this.options()[0];
+            if (first) first.click();
+          } else if (e.key === "Escape" && this.open) {
+            e.preventDefault();
+            this.open = false;
+            this.toggle(false);
+            this.input().focus();
+          } else if (e.key === "Tab" && this.open) {
+            this.open = false;
+            this.toggle(false);
+          }
+        },
+
+        handleOptionKeydown(e, option) {
+          const opts = this.options();
+          const idx = opts.indexOf(option);
+
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            const next = opts[idx + 1];
+            if (next) next.focus();
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            if (idx > 0) {
+              opts[idx - 1].focus();
+            } else {
+              this.open = false;
+              this.toggle(false);
+              this.input().focus();
+            }
+          } else if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            option.click();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            this.open = false;
+            this.toggle(false);
+            this.input().focus();
+          } else if (e.key === "Tab") {
+            e.preventDefault();
+            option.click();
+          }
         }
       }
     </script>
     """
+  end
+
+  defp combo_box(assigns) do
+    ~H"""
+    <div class="relative" phx-hook=".ReviewCombo" id={"#{@field}-combo-#{@index}"}>
+      <div class="relative">
+        <input
+          id={@id}
+          name={"#{@field}_#{@index}"}
+          type="text"
+          value={@value}
+          placeholder={@placeholder}
+          autocomplete="off"
+          role="combobox"
+          aria-expanded="false"
+          aria-controls={"#{@field}-list-#{@index}"}
+          aria-label={@aria_label}
+          phx-change={"search-#{@field}"}
+          phx-value-index={@index}
+          phx-debounce="300"
+          class="w-full rounded-lg border border-base-300 bg-base-100 py-2 pl-3 pr-10 text-sm text-base-content placeholder:text-base-content/40 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/30"
+        />
+        <button
+          type="button"
+          tabindex="-1"
+          aria-label={@dropdown_aria_label}
+          aria-controls={"#{@field}-list-#{@index}"}
+          class="absolute inset-y-0 right-0 flex items-center rounded-r-lg border-l border-base-300 bg-base-100 px-3 text-base-content/60 transition hover:bg-base-200 focus:outline-none focus:ring-2 focus:ring-primary/30"
+        >
+          <.icon name="hero-chevron-down" class="size-4" />
+        </button>
+      </div>
+
+      <div
+        id={"#{@field}-list-#{@index}"}
+        role="listbox"
+        class="hidden absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-base-300 bg-base-100 py-1 shadow-lg"
+      >
+        <% suggested = @suggested %>
+        <% search_results =
+          @search_results |> filter_options(@query) |> Enum.reject(&(&1 in suggested)) %>
+
+        <%= if @empty_option && query_empty?(@query) do %>
+          <div
+            role="option"
+            tabindex="0"
+            phx-click="select-option"
+            phx-value-field={@field}
+            phx-value-index={@index}
+            phx-value-value=""
+            class="cursor-pointer px-3 py-2 text-sm text-base-content/70 hover:bg-base-200 focus:bg-base-200 focus:outline-none"
+          >
+            {@empty_label}
+          </div>
+        <% end %>
+
+        <%= if suggested != [] do %>
+          <div role="group" aria-label="Suggested">
+            <div class="px-3 py-1 text-xs font-medium uppercase tracking-wide text-base-content/50">
+              Suggested
+            </div>
+            <%= for cand <- suggested do %>
+              <div
+                role="option"
+                tabindex="0"
+                phx-click="select-option"
+                phx-value-field={@field}
+                phx-value-index={@index}
+                phx-value-value={cand}
+                class="cursor-pointer px-3 py-2 text-sm text-base-content hover:bg-base-200 focus:bg-base-200 focus:outline-none"
+              >
+                {cand}
+              </div>
+            <% end %>
+          </div>
+        <% end %>
+
+        <%= if search_results != [] do %>
+          <div role="group" aria-label="Search results">
+            <div class="px-3 py-1 text-xs font-medium uppercase tracking-wide text-base-content/50">
+              Search results
+            </div>
+            <%= for cand <- search_results do %>
+              <div
+                role="option"
+                tabindex="0"
+                phx-click="select-option"
+                phx-value-field={@field}
+                phx-value-index={@index}
+                phx-value-value={cand}
+                class="cursor-pointer px-3 py-2 text-sm text-base-content hover:bg-base-200 focus:bg-base-200 focus:outline-none"
+              >
+                {cand}
+              </div>
+            <% end %>
+          </div>
+        <% end %>
+
+        <%= if no_options?(@empty_option, @query, search_results) do %>
+          <div class="px-3 py-2 text-sm text-base-content/50">
+            No pantry matches. The current text will be used as a custom value.
+          </div>
+        <% end %>
+      </div>
+    </div>
+    """
+  end
+
+  defp filter_options(items, nil), do: items
+  defp filter_options(items, ""), do: items
+
+  defp filter_options(items, query) do
+    q = String.downcase(query)
+
+    Enum.filter(items, fn item ->
+      String.contains?(String.downcase(item), q)
+    end)
+  end
+
+  defp query_empty?(nil), do: true
+  defp query_empty?(""), do: true
+  defp query_empty?(_), do: false
+
+  defp no_options?(empty_option, query, search_results) do
+    not empty_option && not query_empty?(query) && search_results == []
+  end
+
+  defp source_food_suggestions(term), do: limited_suggestions(term, &search_foods_safe/1, 5)
+  defp source_unit_suggestions(term), do: limited_suggestions(term, &search_units_safe/1, 5)
+
+  defp limited_suggestions(term, search_fn, limit) do
+    results = search_fn.(term)
+    if results == [], do: Enum.take(search_fn.(""), limit), else: Enum.take(results, limit)
   end
 
   defp search_foods_safe(term) do
@@ -508,24 +876,59 @@ defmodule InstaMealieWeb.ReviewLive do
     end
   end
 
-  defp food_has_no_candates?(index, food_candidates) do
-    case Map.get(food_candidates, index) do
-      list when is_list(list) -> list == []
-      _ -> false
+  defp initial_food_value(ing, cands) do
+    cond do
+      ing.food && ing.food in cands -> ing.food
+      true -> ing.food || ing.raw || ""
     end
   end
 
-  defp unit_has_no_candates?(index, unit_candidates) do
-    case Map.get(unit_candidates, index) do
-      list when is_list(list) -> list == []
-      _ -> false
+  defp initial_unit_value(ing, cands) do
+    cond do
+      ing.unit && ing.unit in cands -> ing.unit
+      true -> ing.unit || ""
     end
+  end
+
+  defp preview_parts(ing, selected_food, selected_unit) do
+    food = if selected_food && selected_food != "", do: selected_food, else: "?"
+    unit = selected_unit || ""
+    note = ing.note || ""
+
+    %{
+      quantity_unit: formatted_quantity_unit(ing.quantity, unit),
+      food: food,
+      note: note
+    }
+  end
+
+  defp formatted_quantity_unit(_quantity, unit) when unit == "" or unit == nil, do: ""
+
+  defp formatted_quantity_unit(quantity, unit) do
+    formatted_quantity = format_quantity(quantity)
+    if formatted_quantity != "", do: formatted_quantity <> " " <> unit, else: unit
+  end
+
+  defp format_quantity(nil), do: ""
+  defp format_quantity(""), do: ""
+  defp format_quantity(q) when is_integer(q), do: to_string(q)
+
+  defp format_quantity(q) when is_float(q) do
+    if trunc(q) == q, do: to_string(trunc(q)), else: to_string(q)
+  end
+
+  defp format_quantity(q), do: to_string(q)
+
+  defp import_summary(ingredients) do
+    count = Enum.count(ingredients)
+    plural = if count == 1, do: "ingredient", else: "ingredients"
+    "#{count} #{plural} to import"
   end
 
   defp confidence_badge(nil),
     do: "rounded-full bg-warning/15 px-2 py-0.5 text-xs font-medium text-warning"
 
-  defp confidence_badge(c) when c >= 0.85,
+  defp confidence_badge(c) when c >= @confidence_threshold,
     do: "rounded-full bg-success/15 px-2 py-0.5 text-xs font-medium text-success"
 
   defp confidence_badge(c) when c >= 0.5,
@@ -535,7 +938,15 @@ defmodule InstaMealieWeb.ReviewLive do
     do: "rounded-full bg-error/15 px-2 py-0.5 text-xs font-medium text-error"
 
   defp confidence_label(nil), do: "Unknown"
-  defp confidence_label(c) when c >= 0.85, do: "High"
+  defp confidence_label(c) when c >= @confidence_threshold, do: "High"
   defp confidence_label(c) when c >= 0.5, do: "Medium"
   defp confidence_label(_), do: "Low"
+
+  defp initial_food(ing), do: ing.food || ing.raw || ""
+  defp initial_unit(ing), do: ing.unit || ""
+
+  defp confidence_percent_label(nil), do: "Unknown confidence"
+  defp confidence_percent_label(c) when c >= 1.0, do: "100% confidence"
+  defp confidence_percent_label(c) when c >= 0, do: "#{round(c * 100)}% confidence"
+  defp confidence_percent_label(_), do: "Unknown confidence"
 end

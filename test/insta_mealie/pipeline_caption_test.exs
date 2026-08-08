@@ -14,7 +14,7 @@ defmodule InstaMealie.PipelineCaptionTest do
 
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded} = job}, 5000
 
-      assert job.caption_only == true
+      assert job.mode == :caption_only
       assert Map.get(job.stages, :fetch) == :skipped
       assert Map.get(job.stages, :llm_format) == :done
       assert Map.get(job.stages, :mealie_import) == :done
@@ -27,7 +27,7 @@ defmodule InstaMealie.PipelineCaptionTest do
     test "submit_caption re-runs caption-only routing on the same job_id" do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
 
-      Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+      Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
         {:error, :network, "could not reach instagram"}
       end)
 
@@ -39,7 +39,7 @@ defmodule InstaMealie.PipelineCaptionTest do
       assert {:ok, ^id} = Pipeline.submit_caption(id, "1 cup flour. Bake 20 min.")
 
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded} = done}, 5000
-      assert done.caption_only == true
+      assert done.mode == :caption_only
       assert Map.get(done.stages, :fetch) == :skipped
       assert done.verdict == :recipe_complete
     end

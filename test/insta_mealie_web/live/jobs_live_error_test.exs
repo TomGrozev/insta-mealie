@@ -27,7 +27,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     test "fetch/network: banner badge, error_class tag, info-icon popover, retry + paste-caption, no transcribe-anyway" do
       {id, _} =
         start_failed_job(fn ->
-          Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+          Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
             {:error, :network, "could not reach instagram"}
           end)
         end)
@@ -50,7 +50,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     test "fetch/ip_banned: paste-only (retry hidden, paste-caption shown)" do
       {id, _} =
         start_failed_job(fn ->
-          Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+          Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
             {:error, :ip_banned, "ip address banned by instagram"}
           end)
         end)
@@ -160,7 +160,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     test "mealie_import/validation: dead row (no CTAs)" do
       {id, _} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :mealie_http_adapter, fn %{method: m, path: p} ->
+          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
             case {m, p} do
               {:post, "/api/recipes"} ->
                 {:error, :validation, "mealie rejected the recipe"}
@@ -181,10 +181,60 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
       assert html =~ "validation"
     end
 
+    test "mealie_import/api_error: retry shown (client error is retryable)" do
+      {id, _} =
+        start_failed_job(fn ->
+          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
+            case {m, p} do
+              {:post, "/api/recipes"} ->
+                {:error, :api_error, "mealie returned HTTP 400"}
+
+              _ ->
+                {:ok, %{}}
+            end
+          end)
+        end)
+
+      view = mount_view()
+      assert has_element?(view, "#retry-#{id}")
+      refute has_element?(view, "#paste-caption-#{id}")
+      refute has_element?(view, "#transcribe-anyway-#{id}")
+    end
+
+    test "mealie_import/api_error: clicking retry consumes attempt and updates UI" do
+      {id, job} =
+        start_failed_job(fn ->
+          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
+            case {m, p} do
+              {:post, "/api/recipes"} ->
+                {:error, :api_error, "mealie returned HTTP 400"}
+
+              _ ->
+                {:ok, %{}}
+            end
+          end)
+        end)
+
+      assert Map.get(job.retry_count, :mealie_import, 0) == 0
+
+      view = mount_view()
+      html = render(view)
+      assert html =~ "Retry (2 left)"
+
+      view |> element("#retry-#{id}") |> render_click()
+      assert_receive {:job_updated, %Job{id: ^id, state: :failed}}, 5000
+
+      updated_job = Pipeline.get_job(id)
+      assert Map.get(updated_job.retry_count, :mealie_import, 0) == 1
+
+      html = render(view)
+      assert html =~ "Retry (1 left)"
+    end
+
     test "mealie_import/network: retry shown (network is retryable)" do
       {id, _} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :mealie_http_adapter, fn %{method: m, path: p} ->
+          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
             case {m, p} do
               {:post, "/api/recipes"} ->
                 {:error, :network, "mealie is down"}
@@ -204,7 +254,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     test "mealie_import/auth: retry shown (auth is retryable)" do
       {id, _} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :mealie_http_adapter, fn %{method: m, path: p} ->
+          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
             case {m, p} do
               {:post, "/api/recipes"} ->
                 {:error, :auth, "mealie token rejected"}
@@ -226,7 +276,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     test "retry is capped at 2; past cap the button is hidden" do
       {id, _} =
         start_failed_job(fn ->
-          Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+          Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
             {:error, :network, "could not reach instagram"}
           end)
         end)
@@ -248,11 +298,85 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     end
   end
 
+  describe "mealie_import retry preserves created slug" do
+    test "retry reuses the created slug instead of POSTing a new recipe" do
+      {:ok, counter} = Agent.start_link(fn -> %{post: 0, put: 0} end)
+
+      on_exit(fn ->
+        if Process.alive?(counter), do: Agent.stop(counter)
+      end)
+
+      {id, _job} =
+        start_failed_job(fn ->
+          Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
+            case {method, path} do
+              {:post, "/api/parser/ingredients"} ->
+                ingredients = if is_list(body), do: body, else: []
+
+                parsed =
+                  Enum.map(ingredients, fn _ing ->
+                    %{
+                      "quantity" => nil,
+                      "unit" => %{"name" => nil},
+                      "food" => %{
+                        "name" => "unknown",
+                        "id" => "stub-food",
+                        "confidence" => 1.0
+                      },
+                      "note" => nil
+                    }
+                  end)
+
+                {:ok, parsed}
+
+              {:post, "/api/recipes"} ->
+                Agent.update(counter, fn s -> %{s | post: s.post + 1} end)
+                {:ok, %{"slug" => "initial-slug", "id" => "initial-slug"}}
+
+              {:put, "/api/recipes/" <> _slug} ->
+                current_put = Agent.get(counter, & &1.put)
+                Agent.update(counter, fn s -> %{s | put: s.put + 1} end)
+
+                if current_put == 0 do
+                  {:error, :api_error, "first PUT failed"}
+                else
+                  {:ok, %{"slug" => "initial-slug"}}
+                end
+
+              _ ->
+                {:ok, %{}}
+            end
+          end)
+        end)
+
+      # Job should have failed at mealie_import
+      failed_job = Pipeline.get_job(id)
+      assert failed_job.error_stage == :mealie_import
+
+      view = mount_view()
+      assert has_element?(view, "#retry-#{id}")
+
+      view |> element("#retry-#{id}") |> render_click()
+      assert_receive {:job_updated, %Job{id: ^id, state: :succeeded}}, 5000
+
+      %{post: post_count, put: put_count} = Agent.get(counter, & &1)
+
+      assert post_count == 1,
+             "Expected exactly 1 POST (no duplicate draft), got #{post_count}"
+
+      assert put_count == 2,
+             "Expected exactly 2 PUTs (original + retry), got #{put_count}"
+
+      updated_job = Pipeline.get_job(id)
+      assert updated_job.slug == "initial-slug"
+    end
+  end
+
   describe "CTA wiring" do
     test "paste-caption reveals an inline caption form" do
       {id, _} =
         start_failed_job(fn ->
-          Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+          Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
             {:error, :network, "could not reach instagram"}
           end)
         end)

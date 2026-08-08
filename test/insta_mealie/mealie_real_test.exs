@@ -10,6 +10,20 @@ defmodule FakeMealie do
     |> send_resp(201, Jason.encode!(%{slug: "granola-1", id: "granola-1"}))
   end
 
+  get "/api/recipes/:slug" do
+    recipe = %{
+      "id" => "server-id-#{slug}",
+      "slug" => slug,
+      "name" => "Recipe",
+      "recipeIngredient" => [],
+      "recipeInstructions" => []
+    }
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, Jason.encode!(recipe))
+  end
+
   put "/api/recipes/:slug" do
     conn
     |> put_resp_content_type("application/json")
@@ -25,13 +39,13 @@ defmodule FakeMealie do
   get "/api/foods" do
     conn
     |> put_resp_content_type("application/json")
-    |> send_resp(200, Jason.encode!(%{data: [%{"name" => "oats"}]}))
+    |> send_resp(200, Jason.encode!(%{items: [%{"name" => "oats"}]}))
   end
 
   get "/api/units" do
     conn
     |> put_resp_content_type("application/json")
-    |> send_resp(200, Jason.encode!(%{data: [%{"name" => "cup"}]}))
+    |> send_resp(200, Jason.encode!(%{items: [%{"name" => "cup"}]}))
   end
 
   post "/api/parser/ingredients" do
@@ -76,6 +90,7 @@ defmodule InstaMealie.Mealie.RealTest do
   alias InstaMealie.Pipeline.Job
   alias InstaMealie.Pipeline.JobStore
   alias InstaMealie.PubSub
+  alias InstaMealie.Recipe
 
   setup do
     Mox.set_mox_global()
@@ -99,8 +114,8 @@ defmodule InstaMealie.Mealie.RealTest do
     # Use Mock for YtDlp only
     Application.put_env(:insta_mealie, InstaMealie.YtDlp, InstaMealie.YtDlp.Mock)
 
-    # Register YtDlp mock to return canned data
-    Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+    # Register YtDlp mock to return canned data (two-stage fetch contract)
+    Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
       caption = """
       Homemade Granola
       Makes about 8 servings.
@@ -123,9 +138,16 @@ defmodule InstaMealie.Mealie.RealTest do
            %{author: "random_fan", text: "tried this, loved it"},
            %{author: "chef_og", text: "Tip: use parchment paper."}
          ],
-         video_path:
+         fetch_dir: "/tmp/insta_mealie/fetch_mealie"
+       }}
+    end)
+
+    Mox.stub(InstaMealie.YtDlp.Mock, :fetch_audio, fn _url, _opts ->
+      {:ok,
+       %{
+         audio_path:
            "/tmp/insta_mealie/" <>
-             (:crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)) <> ".mp4"
+             (:crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)) <> ".mp3"
        }}
     end)
 
@@ -179,23 +201,24 @@ defmodule InstaMealie.Mealie.RealTest do
     {:ok, port: port, base: base}
   end
 
-  describe "build_payload/1" do
+  describe "Recipe.to_mealie_payload/1" do
     test "forwards known Mealie keys, drops unknown" do
-      recipe = %{
-        "name" => "Granola",
-        "description" => "Tasty",
-        "recipeYield" => "8",
-        "recipeIngredient" => ["3 cups oats"],
-        "recipeInstructions" => [%{"text" => "Mix"}],
-        "tags" => ["breakfast"],
-        "secret" => "ignored"
-      }
+      recipe =
+        Recipe.from_map(%{
+          "name" => "Granola",
+          "description" => "Tasty",
+          "recipeYield" => "8",
+          "recipeIngredient" => ["3 cups oats"],
+          "recipeInstructions" => [%{"text" => "Mix"}],
+          "tags" => ["breakfast"],
+          "secret" => "ignored"
+        })
 
-      payload = Mealie.build_payload(recipe)
+      payload = Recipe.to_mealie_payload(recipe)
       assert payload["name"] == "Granola"
-      assert payload["recipeIngredient"] == ["3 cups oats"]
+      assert [%{"note" => "3 cups oats"}] = payload["recipeIngredient"]
       assert payload["tags"] == ["breakfast"]
-      assert payload["recipeInstructions"] == [%{"text" => "Mix"}]
+      assert payload["recipeInstructions"] == [%{"text" => "Mix", "type" => "RecipeInstruction"}]
       refute Map.has_key?(payload, "secret")
     end
   end
@@ -214,7 +237,9 @@ defmodule InstaMealie.Mealie.RealTest do
     end
 
     test "auth errors" do
-      assert Mealie.classify_response(%{status: 401, body: %{}}) == {:error, :auth, "unauthorized"}
+      assert Mealie.classify_response(%{status: 401, body: %{}}) ==
+               {:error, :auth, "unauthorized"}
+
       assert Mealie.classify_response(%{status: 403, body: %{}}) == {:error, :auth, "forbidden"}
     end
 
@@ -227,6 +252,20 @@ defmodule InstaMealie.Mealie.RealTest do
       assert Mealie.classify_response(%{status: 404, body: %{}}) ==
                {:error, :api_error, "client error 404"}
     end
+
+    test "non-empty error body is retained in the error reason for diagnostics" do
+      body = %{
+        "detail" => [
+          %{"loc" => ["body", "recipeIngredient", 0], "msg" => "invalid ingredient"}
+        ]
+      }
+
+      assert {:error, :api_error, reason} =
+               Mealie.classify_response(%{status: 400, body: body})
+
+      assert reason =~ "recipeIngredient"
+      assert reason =~ "invalid ingredient"
+    end
   end
 
   describe "search dispatch" do
@@ -236,6 +275,320 @@ defmodule InstaMealie.Mealie.RealTest do
 
     test "search_units returns data list" do
       assert {:ok, [%{"name" => "cup"}]} = Mealie.search_units("cup")
+    end
+  end
+
+  describe "parse_ingredients/1 request shape" do
+    test "wraps ingredients in a map with an \"ingredients\" key (Mealie API contract)" do
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      test_pid = self()
+
+      Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
+        send(test_pid, {:adapter_called, method, path, body})
+        # Return a minimal success response: list of parsed ingredient maps
+        {:ok,
+         [
+           %{"quantity" => 1, "unit" => %{}, "food" => %{"name" => "flour"}, "note" => nil},
+           %{"quantity" => 2, "unit" => %{}, "food" => %{"name" => "eggs"}, "note" => nil}
+         ]}
+      end)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          _ -> Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+        end
+      end)
+
+      ingredients = ["1 cup flour", "2 eggs"]
+      assert {:ok, _parsed} = Mealie.parse_ingredients(ingredients)
+
+      assert_receive {:adapter_called, :post, "/api/parser/ingredients", body}
+
+      # The Mealie API expects a map wrapping the ingredient strings,
+      # i.e. %{"ingredients" => [...]}, NOT a bare list.
+      assert body == %{"ingredients" => ingredients}
+    end
+  end
+
+  describe "parse_ingredients/1 nested response fields" do
+    test "preserves nested quantity, unit, food, and note from Mealie parser response" do
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(:insta_mealie, :mealie_http_adapter, fn _method, _path, _body ->
+        {:ok,
+         [
+           %{
+             "ingredient" => %{
+               "quantity" => 1,
+               "unit" => %{"name" => "cup", "id" => "unit-id"},
+               "food" => %{"name" => "flour", "id" => "food-id", "confidence" => 0.9},
+               "note" => "sifted"
+             }
+           }
+         ]}
+      end)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          _ -> Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+        end
+      end)
+
+      assert {:ok, [parsed]} = Mealie.parse_ingredients(["1 cup flour"])
+
+      assert parsed == %{
+               "quantity" => 1,
+               "unit" => "cup",
+               "unit_id" => "unit-id",
+               "food" => "flour",
+               "food_id" => "food-id",
+               "food_confidence" => 0.9,
+               "note" => "sifted"
+             }
+    end
+  end
+
+  describe "parse_ingredients/1 top-level confidence (Mealie response shape)" do
+    test "reads food confidence from top-level item.confidence.food" do
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(:insta_mealie, :mealie_http_adapter, fn _method, _path, _body ->
+        {:ok,
+         [
+           %{
+             "confidence" => %{"food" => 0.97},
+             "ingredient" => %{
+               "quantity" => 3,
+               "unit" => %{"name" => "cups", "id" => "unit-cups"},
+               "food" => %{"name" => "oats", "id" => "food-oats"},
+               "note" => nil
+             }
+           }
+         ]}
+      end)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          _ -> Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+        end
+      end)
+
+      assert {:ok, [parsed]} = Mealie.parse_ingredients(["3 cups oats"])
+
+      assert parsed == %{
+               "quantity" => 3,
+               "unit" => "cups",
+               "unit_id" => "unit-cups",
+               "food" => "oats",
+               "food_id" => "food-oats",
+               "food_confidence" => 0.97,
+               "note" => nil
+             }
+    end
+
+    test "falls back to nested food.confidence when top-level confidence is missing" do
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(:insta_mealie, :mealie_http_adapter, fn _method, _path, _body ->
+        {:ok,
+         [
+           %{
+             "ingredient" => %{
+               "quantity" => 1,
+               "unit" => %{"name" => "cup", "id" => "unit-id"},
+               "food" => %{"name" => "flour", "id" => "food-id", "confidence" => 0.9},
+               "note" => "sifted"
+             }
+           }
+         ]}
+      end)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          _ -> Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+        end
+      end)
+
+      assert {:ok, [parsed]} = Mealie.parse_ingredients(["1 cup flour"])
+
+      assert parsed == %{
+               "quantity" => 1,
+               "unit" => "cup",
+               "unit_id" => "unit-id",
+               "food" => "flour",
+               "food_id" => "food-id",
+               "food_confidence" => 0.9,
+               "note" => "sifted"
+             }
+    end
+
+    test "top-level confidence with non-map or missing food key falls back to nested" do
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(:insta_mealie, :mealie_http_adapter, fn _method, _path, _body ->
+        {:ok,
+         [
+           %{
+             "confidence" => "invalid",
+             "ingredient" => %{
+               "quantity" => 1,
+               "unit" => %{"name" => "cup", "id" => "unit-id"},
+               "food" => %{"name" => "flour", "id" => "food-id", "confidence" => 0.5},
+               "note" => nil
+             }
+           }
+         ]}
+      end)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          _ -> Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+        end
+      end)
+
+      assert {:ok, [parsed]} = Mealie.parse_ingredients(["1 cup flour"])
+
+      assert parsed["food_confidence"] == 0.5
+    end
+
+    test "uses top-level confidence.average when confidence.food is absent (newer Mealie shape)" do
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(:insta_mealie, :mealie_http_adapter, fn _method, _path, _body ->
+        {:ok,
+         [
+           %{
+             "confidence" => %{"average" => 0.93},
+             "ingredient" => %{
+               "quantity" => 3,
+               "unit" => %{"name" => "cups", "id" => "unit-cups"},
+               "food" => %{"name" => "oats", "id" => "food-oats"},
+               "note" => nil
+             }
+           }
+         ]}
+      end)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          _ -> Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+        end
+      end)
+
+      assert {:ok, [parsed]} = Mealie.parse_ingredients(["3 cups oats"])
+
+      assert parsed == %{
+               "quantity" => 3,
+               "unit" => "cups",
+               "unit_id" => "unit-cups",
+               "food" => "oats",
+               "food_id" => "food-oats",
+               "food_confidence" => 0.93,
+               "note" => nil
+             }
+    end
+
+    test "both confidence sources missing yields nil without crashing" do
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(:insta_mealie, :mealie_http_adapter, fn _method, _path, _body ->
+        {:ok,
+         [
+           %{
+             "ingredient" => %{
+               "quantity" => 1,
+               "unit" => %{"name" => "cup", "id" => "unit-id"},
+               "food" => %{"name" => "flour", "id" => "food-id"},
+               "note" => nil
+             }
+           }
+         ]}
+      end)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          _ -> Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+        end
+      end)
+
+      assert {:ok, [parsed]} = Mealie.parse_ingredients(["1 cup flour"])
+
+      assert parsed["food_confidence"] == nil
+    end
+  end
+
+  describe "create_recipe/1 with plain string response" do
+    test "accepts a bare string slug from the adapter" do
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(:insta_mealie, :mealie_http_adapter, fn _method, _path, _body ->
+        {:ok, "plain-slug"}
+      end)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          _ -> Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+        end
+      end)
+
+      assert Mealie.create_recipe(Recipe.from_map(%{"name" => "Test"})) == {:ok, "plain-slug"}
+    end
+  end
+
+  describe "update_recipe/2" do
+    test "performs GET then PUT, and PUT body contains server id/slug plus caller fields" do
+      test_pid = self()
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
+        send(test_pid, {:adapter_called, method, path, body})
+
+        case method do
+          :get ->
+            {:ok,
+             %{
+               "id" => "draft-id",
+               "slug" => "draft-slug",
+               "name" => "Recipe",
+               "recipeIngredient" => [],
+               "recipeInstructions" => []
+             }}
+
+          :put ->
+            {:ok, %{"slug" => "draft-slug"}}
+        end
+      end)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          _ -> Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+        end
+      end)
+
+      assert {:ok, "draft-slug"} =
+               Mealie.update_recipe(
+                 "draft-slug",
+                 Recipe.from_map(%{"name" => "Updated Granola"})
+               )
+
+      # Must have done a GET first
+      assert_receive {:adapter_called, :get, "/api/recipes/draft-slug", _}
+
+      # Must have done a PUT with server identity preserved
+      assert_receive {:adapter_called, :put, "/api/recipes/draft-slug", put_body}
+      assert put_body["id"] == "draft-id"
+      assert put_body["slug"] == "draft-slug"
+      assert put_body["name"] == "Updated Granola"
     end
   end
 

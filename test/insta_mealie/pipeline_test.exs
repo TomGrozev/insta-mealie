@@ -97,7 +97,11 @@ defmodule InstaMealie.PipelineTest do
         updated_at: DateTime.utc_now()
       }
 
-      :ets.insert(:insta_mealie_jobs, {job.id, job, System.system_time(:millisecond) - 1000, System.system_time(:millisecond)})
+      :ets.insert(
+        :insta_mealie_jobs,
+        {job.id, job, System.system_time(:millisecond) - 1000, System.system_time(:millisecond)}
+      )
+
       assert JobStore.get("exp1")
       assert :ok = JobStore.sweep()
       refute JobStore.get("exp1")
@@ -197,7 +201,7 @@ defmodule InstaMealie.PipelineTest do
   describe "missing_fields vocab" do
     test "normalize_envelope drops unknown fields and de-duplicates" do
       env =
-        InstaMealie.Llm.normalize_envelope(%{
+        InstaMealie.LLM.normalize_envelope(%{
           completeness: "recipe_partial",
           missing_fields: [
             "recipeIngredient",
@@ -267,7 +271,7 @@ defmodule InstaMealie.PipelineTest do
     test "only OP comments reach the routing LLM call" do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
 
-      Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+      Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
         {:ok,
          %{
            author: "op_user",
@@ -277,7 +281,7 @@ defmodule InstaMealie.PipelineTest do
              %{author: "stranger", text: "not the owner"},
              %{author: "op_user", text: "OP says bye"}
            ],
-           video_path: "/tmp/insta_mealie/x.mp4"
+           fetch_dir: "/tmp/insta_mealie/fetch_op"
          }}
       end)
 
