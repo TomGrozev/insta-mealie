@@ -18,6 +18,7 @@ defmodule InstaMealie.Pipeline.Job do
     :input,
     :url,
     :caption,
+    :caption_only,
     :state,
     :stage,
     :stages,
@@ -81,10 +82,66 @@ defmodule InstaMealie.Pipeline.Job do
   # ---- FSM ----
 
   defp run_pipeline(job) do
-    job
-    |> set_stage(:fetch, :running)
-    |> persist()
-    |> run_fetch()
+    if job.caption_only do
+      run_caption_only(job)
+    else
+      job
+      |> set_stage(:fetch, :running)
+      |> persist()
+      |> run_fetch()
+    end
+  end
+
+  # ---- caption-only routing (paste-caption / degraded mode) ----
+
+  defp run_caption_only(job) do
+    job =
+      %{job | state: :caption_pasting}
+      |> set_stage(:fetch, :skipped)
+      |> persist()
+
+    run_caption_format(job)
+  end
+
+  defp run_caption_format(job) do
+    job = set_stage(job, :llm_format, :running) |> persist()
+
+    case Clients.format(job.caption, comments: [], output_language: job.output_language) do
+      {:ok, envelope} ->
+        env = Llm.normalize_envelope(envelope)
+
+        job =
+          job
+          |> set_stage(:llm_format, :done)
+          |> set_recipe(env.recipe)
+          |> set_verdict(env.completeness)
+          |> set_missing_fields(env.missing_fields)
+          |> persist()
+
+        case env.completeness do
+          :recipe_complete ->
+            job
+            |> skip_stage(:transcribe)
+            |> skip_stage(:llm_merge)
+            |> persist()
+            |> run_import()
+
+          _other ->
+            fail_incomplete_caption(job)
+        end
+
+      {:error, class, reason} ->
+        fail(job, :llm_format, class, reason)
+    end
+  end
+
+  defp fail_incomplete_caption(job) do
+    fail(
+      job,
+      :llm_format,
+      :incomplete_caption,
+      "The pasted caption does not contain a complete recipe, and there is no audio to transcribe."
+    )
   end
 
   defp run_fetch(job) do

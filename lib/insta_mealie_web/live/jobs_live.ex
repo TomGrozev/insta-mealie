@@ -41,6 +41,21 @@ defmodule InstaMealieWeb.JobsLive do
     end
   end
 
+  def handle_event("create-caption", params, socket) do
+    raw = params["caption"]
+    caption = if is_map(raw), do: Map.get(raw, "caption", ""), else: raw
+    caption = String.trim(caption || "")
+
+    if caption == "" do
+      {:noreply, assign(socket, :form_error, "Paste a caption to begin.")}
+    else
+      case Pipeline.create_job(%{caption: caption}) do
+        {:ok, _id} -> {:noreply, assign(socket, :form_error, nil)}
+        {:error, _} -> {:noreply, assign(socket, :form_error, "Could not start the job.")}
+      end
+    end
+  end
+
   def handle_event("retry", %{"job-id" => job_id}, socket) do
     Pipeline.retry(job_id)
     {:noreply, socket}
@@ -91,9 +106,35 @@ defmodule InstaMealieWeb.JobsLive do
             <p class="font-medium">Caption-only mode</p>
             <p class="mt-1">
               yt-dlp browser impersonation is unavailable in this environment, so reel
-              fetching is disabled. Paste-caption import arrives in a later update.
+              fetching is disabled. Paste a reel caption below to import it without the video.
             </p>
           </div>
+
+          <.form
+            for={@caption_form}
+            id="caption-create-form"
+            phx-submit="create-caption"
+            class="flex items-start gap-2"
+          >
+            <.input
+              field={@caption_form[:caption]}
+              name="caption"
+              type="textarea"
+              rows="3"
+              placeholder="Paste the reel caption…"
+              class="w-full rounded-xl border border-base-300 bg-base-100 px-4 py-3 text-base-content placeholder:text-base-content/40 focus:border-primary focus:ring-2 focus:ring-primary/30"
+            />
+            <button
+              type="submit"
+              class="shrink-0 rounded-xl bg-primary px-5 py-3 font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
+            >
+              Create job
+            </button>
+          </.form>
+
+          <%= if @form_error do %>
+            <p class="text-sm text-error">{@form_error}</p>
+          <% end %>
         <% else %>
           <.form for={@form} id="job-form" phx-submit="create" class="flex items-center gap-2">
             <div class="relative flex-1">
@@ -301,6 +342,7 @@ defmodule InstaMealieWeb.JobsLive do
     case {job.error_stage, job.error_class} do
       {:mealie_import, :validation} -> false
       {:fetch, :ip_banned} -> false
+      {:llm_format, :incomplete_caption} -> false
       {:mealie_import, class} -> class in [:network, :auth]
       {stage, _class} when stage in [:fetch, :transcribe, :llm_format, :llm_merge] -> true
       _ -> false
@@ -348,7 +390,11 @@ defmodule InstaMealieWeb.JobsLive do
         end
 
       :llm_format ->
-        "Recipe formatting failed. Retry to try again."
+        if job.error_class == :incomplete_caption do
+          "The pasted caption doesn't contain a complete recipe, and there's no audio to transcribe. Try a fuller caption."
+        else
+          "Recipe formatting failed. Retry to try again."
+        end
 
       :mealie_import ->
         "The recipe could not be imported. Retry the import."
