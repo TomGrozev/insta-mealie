@@ -1,5 +1,14 @@
 import Config
 
+# Always use stub clients in tests, regardless of host binaries, and skip
+# the boot preflight so the suite stays network/CLI-free.
+config :insta_mealie, :clients,
+  mealie: InstaMealie.MealieStub,
+  llm: InstaMealie.LlmStub,
+  ytdlp: InstaMealie.YtDlpStub
+
+config :insta_mealie, :skip_preflight, true
+
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
 config :insta_mealie, InstaMealieWeb.Endpoint,

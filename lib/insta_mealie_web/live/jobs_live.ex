@@ -17,6 +17,7 @@ defmodule InstaMealieWeb.JobsLive do
       socket
       |> assign(:form, to_form(%{"url" => ""}, as: :job))
       |> assign(:form_error, nil)
+      |> assign(:degraded, InstaMealie.YtDlp.Real.degraded?())
       |> stream(:jobs, jobs, reset: true)
       |> assign(:jobs_empty?, jobs == [])
 
@@ -57,28 +58,38 @@ defmodule InstaMealieWeb.JobsLive do
           </p>
         </header>
 
-        <.form for={@form} id="job-form" phx-submit="create" class="flex items-center gap-2">
-          <div class="relative flex-1">
-            <.input
-              field={@form[:url]}
-              type="url"
-              placeholder="https://instagram.com/reel/..."
-              class="w-full rounded-xl border border-base-300 bg-base-100 px-4 py-3 pl-11 text-base-content placeholder:text-base-content/40 focus:border-primary focus:ring-2 focus:ring-primary/30"
-            />
-            <span class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-base-content/40">
-              <.icon name="hero-link" class="size-5" />
-            </span>
+        <%= if @degraded do %>
+          <div class="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
+            <p class="font-medium">Caption-only mode</p>
+            <p class="mt-1">
+              yt-dlp browser impersonation is unavailable in this environment, so reel
+              fetching is disabled. Paste-caption import arrives in a later update.
+            </p>
           </div>
-          <button
-            type="submit"
-            class="rounded-xl bg-primary px-5 py-3 font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
-          >
-            Create job
-          </button>
-        </.form>
+        <% else %>
+          <.form for={@form} id="job-form" phx-submit="create" class="flex items-center gap-2">
+            <div class="relative flex-1">
+              <.input
+                field={@form[:url]}
+                type="url"
+                placeholder="https://instagram.com/reel/..."
+                class="w-full rounded-xl border border-base-300 bg-base-100 px-4 py-3 pl-11 text-base-content placeholder:text-base-content/40 focus:border-primary focus:ring-2 focus:ring-primary/30"
+              />
+              <span class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-base-content/40">
+                <.icon name="hero-link" class="size-5" />
+              </span>
+            </div>
+            <button
+              type="submit"
+              class="rounded-xl bg-primary px-5 py-3 font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
+            >
+              Create job
+            </button>
+          </.form>
 
-        <%= if @form_error do %>
-          <p class="text-sm text-error">{@form_error}</p>
+          <%= if @form_error do %>
+            <p class="text-sm text-error">{@form_error}</p>
+          <% end %>
         <% end %>
 
         <section class="space-y-3">

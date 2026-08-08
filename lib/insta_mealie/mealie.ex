@@ -10,4 +10,6 @@ defmodule InstaMealie.Mealie do
   @callback update_recipe(slug :: String.t(), recipe :: map()) ::
               {:ok, String.t()} | {:error, atom(), term()}
   @callback deep_link(slug :: String.t()) :: String.t()
+  @callback search_foods(term :: String.t()) :: {:ok, list()} | {:error, atom(), term()}
+  @callback search_units(term :: String.t()) :: {:ok, list()} | {:error, atom(), term()}
 end

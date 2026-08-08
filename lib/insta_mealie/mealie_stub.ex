@@ -17,4 +17,10 @@ defmodule InstaMealie.MealieStub do
     group = Application.get_env(:insta_mealie, :mealie, [])[:group_slug] || "home"
     "#{base}/g/#{group}/r/#{slug}?edit=true"
   end
+
+  @impl true
+  def search_foods(_term), do: {:ok, []}
+
+  @impl true
+  def search_units(_term), do: {:ok, []}
 end
