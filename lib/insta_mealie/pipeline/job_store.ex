@@ -23,13 +23,6 @@ defmodule InstaMealie.Pipeline.JobStore do
     :ok
   end
 
-  @doc false
-  def insert_raw(job, expires_at_ms) do
-    now_ms = System.system_time(:millisecond)
-    :ets.insert(@table, {job.id, job, expires_at_ms, now_ms})
-    :ok
-  end
-
   @doc "Read a job snapshot by id."
   def get(id) do
     case :ets.lookup(@table, id) do

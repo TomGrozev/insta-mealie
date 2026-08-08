@@ -58,15 +58,9 @@ defmodule InstaMealie.Pipeline.Job do
 
   # ---- Public helpers (also used by tests) ----
 
-  @doc """
-  Keep only the comments authored by the reel's owner (OP).
+  # ---- FSM ----
 
-  `op` is the reel author's username (from the fetch result). Each comment
-  is a map with an `:author` (or `"author"`) key. Comments without a
-  matching author are dropped. Non-OP comments must never reach the
-  routing LLM call.
-  """
-  def filter_op_comments(op, comments) when is_binary(op) do
+  defp filter_op_comments(op, comments) when is_binary(op) do
     Enum.filter(comments || [], fn comment ->
       author =
         case comment do
@@ -79,9 +73,7 @@ defmodule InstaMealie.Pipeline.Job do
     end)
   end
 
-  def filter_op_comments(_op, _comments), do: []
-
-  # ---- FSM ----
+  defp filter_op_comments(_op, _comments), do: []
 
   defp run_pipeline(job) do
     cond do
@@ -354,11 +346,7 @@ defmodule InstaMealie.Pipeline.Job do
   defp persist(job) do
     job = %{job | updated_at: DateTime.utc_now()}
     JobStore.put(job)
-    broadcast(job)
+    InstaMealie.Pipeline.broadcast(job)
     job
-  end
-
-  defp broadcast(job) do
-    Phoenix.PubSub.broadcast(PubSub, "jobs", {:job_updated, job})
   end
 end
