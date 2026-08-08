@@ -1,5 +1,5 @@
 defmodule InstaMealie.YtDlpStub do
-  @moduledoc "In-memory yt-dlp stub. Returns a canned caption; never downloads or transcribes."
+  @moduledoc "In-memory yt-dlp stub. Returns a canned caption + comments; never downloads or transcribes."
   @behaviour InstaMealie.YtDlp
 
   @impl true
@@ -19,7 +19,13 @@ defmodule InstaMealie.YtDlpStub do
 
     {:ok,
      %{
+       author: "chef_og",
        caption: caption,
+       comments: [
+         %{author: "chef_og", text: "So good, I add cranberries!"},
+         %{author: "random_fan", text: "tried this, loved it"},
+         %{author: "chef_og", text: "Tip: use parchment paper."}
+       ],
        video_path:
          "/tmp/insta_mealie/" <>
            (:crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)) <> ".mp4"

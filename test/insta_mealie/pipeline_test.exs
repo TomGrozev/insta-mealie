@@ -133,4 +133,121 @@ defmodule InstaMealie.PipelineTest do
       assert render(view) =~ "Open in Mealie"
     end
   end
+
+  describe "branching (no_recipe)" do
+    test "runs transcribe + merge before import (does NOT fail flatly)" do
+      Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
+
+      Application.put_env(:insta_mealie, :clients,
+        mealie: InstaMealie.MealieStub,
+        llm: InstaMealie.Test.LlmNoRecipeDouble,
+        ytdlp: InstaMealie.YtDlpStub
+      )
+
+      assert {:ok, id} = Pipeline.create_job(%{url: "https://instagram.com/reel/nr"})
+      assert_receive {:job_updated, %Job{id: ^id, state: :succeeded} = job}, 5000
+
+      assert job.verdict == :no_recipe
+      assert Map.get(job.stages, :transcribe) == :done
+      assert Map.get(job.stages, :llm_merge) == :done
+      assert Map.get(job.stages, :mealie_import) == :done
+      assert job.recipe["name"] == "Transcribed Granola"
+    end
+  end
+
+  describe "missing_fields vocab" do
+    test "normalize_envelope drops unknown fields and de-duplicates" do
+      env =
+        InstaMealie.Llm.normalize_envelope(%{
+          completeness: "recipe_partial",
+          missing_fields: [
+            "recipeIngredient",
+            "bogus_field",
+            "recipeInstructions",
+            "recipeIngredient"
+          ],
+          recipe: %{"name" => "X"}
+        })
+
+      assert env.completeness == :recipe_partial
+      assert env.missing_fields == [:recipeIngredient, :recipeInstructions]
+      assert env.recipe == %{"name" => "X"}
+    end
+
+    test "pipeline stores only the allowed missing_fields on the job" do
+      Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
+
+      Application.put_env(:insta_mealie, :clients,
+        mealie: InstaMealie.MealieStub,
+        llm: InstaMealie.Test.LlmBogusMissingDouble,
+        ytdlp: InstaMealie.YtDlpStub
+      )
+
+      assert {:ok, id} = Pipeline.create_job(%{url: "https://instagram.com/reel/mf"})
+      assert_receive {:job_updated, %Job{id: ^id, state: :succeeded} = job}, 5000
+      assert job.missing_fields == [:recipeIngredient]
+    end
+  end
+
+  describe "OP comment filtering" do
+    test "filter_op_comments keeps only the owner's comments" do
+      comments = [
+        %{author: "a", text: "1"},
+        %{author: "b", text: "2"},
+        %{author: "a", text: "3"}
+      ]
+
+      assert InstaMealie.Pipeline.Job.filter_op_comments("a", comments) == [
+               %{author: "a", text: "1"},
+               %{author: "a", text: "3"}
+             ]
+
+      assert InstaMealie.Pipeline.Job.filter_op_comments("a", nil) == []
+      assert InstaMealie.Pipeline.Job.filter_op_comments(nil, comments) == []
+    end
+
+    test "only OP comments reach the routing LLM call" do
+      Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
+
+      Application.put_env(:insta_mealie, :clients,
+        mealie: InstaMealie.MealieStub,
+        llm: InstaMealie.Test.LlmCommentsDouble,
+        ytdlp: InstaMealie.Test.YtDlpCommentsDouble
+      )
+
+      assert {:ok, id} = Pipeline.create_job(%{url: "https://instagram.com/reel/cm"})
+      assert_receive {:job_updated, %Job{id: ^id, state: :succeeded} = job}, 5000
+
+      # The double echoes the authors it saw; only op_user (twice) should appear.
+      assert job.recipe["name"] == "authors:op_user,op_user"
+    end
+  end
+
+  describe "Jobs LiveView (branching)" do
+    test "paste URL on a partial verdict runs transcribe + merge and reveals a deep link" do
+      Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
+      conn = build_conn()
+
+      Application.put_env(:insta_mealie, :clients,
+        mealie: InstaMealie.MealieStub,
+        llm: InstaMealie.Test.LlmPartialDouble,
+        ytdlp: InstaMealie.YtDlpStub
+      )
+
+      {:ok, view, _html} = live(conn, "/")
+      assert has_element?(view, "#job-form")
+
+      view
+      |> form("#job-form", job: %{url: "https://instagram.com/reel/branch"})
+      |> render_submit()
+
+      assert_receive {:job_updated,
+                      %Job{state: :succeeded, stages: %{transcribe: :done, llm_merge: :done}}},
+                     5000
+
+      assert render(view) =~ "Open in Mealie"
+      assert has_element?(view, "[data-stage=transcribe]")
+      assert has_element?(view, "[data-stage=llm_merge]")
+    end
+  end
 end
