@@ -40,14 +40,15 @@ defmodule InstaMealie.Pipeline do
     id = generate_id()
     now = DateTime.utc_now()
 
-    caption_only =
-      is_binary(input[:caption] || input["caption"]) and (input[:url] || input["url"]) == nil
+    url = input[:url] || input["url"]
+    caption = input[:caption] || input["caption"]
+    caption_only = is_binary(caption) and url == nil
 
     job = %Job{
       id: id,
       input: input,
-      url: input[:url] || input["url"],
-      caption: input[:caption] || input["caption"],
+      url: url,
+      caption: caption,
       caption_only: caption_only,
       transcribe_anyway: false,
       state: :created,
@@ -93,7 +94,6 @@ defmodule InstaMealie.Pipeline do
   def error_retryable?(class)
       when class in [
              :network,
-             :auth,
              :timeout,
              :rate_limited,
              :ip_banned,
@@ -102,6 +102,7 @@ defmodule InstaMealie.Pipeline do
            ],
       do: true
 
+  def error_retryable?(:auth), do: false
   def error_retryable?(:validation), do: false
   def error_retryable?(:incomplete_caption), do: false
   def error_retryable?(_), do: false
