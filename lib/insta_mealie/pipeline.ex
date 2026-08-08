@@ -100,8 +100,9 @@ defmodule InstaMealie.Pipeline do
   def error_retryable?(_), do: false
 
   @doc """
-  Retry a job from the start, preserving its `job_id`. Full retry semantics
-  (per-stage cap, CTA matrix) land in a later ticket; this resets and re-runs.
+  Retry a job from the start, preserving its `job_id`. Each retry is counted
+  per failing stage (capped at 2 in the UI — see `InstaMealieWeb.JobsLive`);
+  once a stage's retry budget is exhausted, the Retry CTA is hidden.
   """
   def retry(job_id) when is_binary(job_id) do
     case JobStore.get(job_id) do
@@ -110,6 +111,15 @@ defmodule InstaMealie.Pipeline do
 
       job ->
         stop_job(job_id)
+
+        old_stage = job.error_stage
+
+        retry_count =
+          if old_stage do
+            Map.put(job.retry_count, old_stage, Map.get(job.retry_count, old_stage, 0) + 1)
+          else
+            job.retry_count
+          end
 
         reset =
           %{
@@ -125,6 +135,7 @@ defmodule InstaMealie.Pipeline do
               error_stage: nil,
               error_class: nil,
               error_summary: nil,
+              retry_count: retry_count,
               updated_at: DateTime.utc_now()
           }
 
