@@ -13,7 +13,7 @@ defmodule InstaMealie.Pipeline do
   """
   use Supervisor
 
-  alias InstaMealie.Pipeline.{Job, JobStore, JobSupervisor, Sweeper, Clients}
+  alias InstaMealie.Pipeline.{Job, JobStore, JobSupervisor, Sweeper}
   alias InstaMealie.PubSub
 
   @doc false
@@ -316,7 +316,6 @@ defmodule InstaMealie.Pipeline do
             job
             | recipe: resolved_recipe,
               review: nil,
-              state: :created,
               stage: :mealie_import,
               stages: Map.put(job.stages, :mealie_import, :running)
           }
@@ -333,7 +332,7 @@ defmodule InstaMealie.Pipeline do
   defp run_import_inline(job) do
     recipe = job.recipe || %{}
 
-    case Clients.import_recipe(recipe) do
+    case InstaMealie.Mealie.import_recipe(recipe) do
       {:ok, slug, deep_link} ->
         updated =
           %{
@@ -381,7 +380,7 @@ defmodule InstaMealie.Pipeline do
     Application.get_env(:insta_mealie, :insta_mealie, [])[:output_language] || "en"
   end
 
-  defp broadcast(job) do
+  def broadcast(job) do
     Phoenix.PubSub.broadcast(PubSub, "jobs", {:job_updated, job})
   end
 end

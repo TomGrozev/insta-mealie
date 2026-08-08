@@ -23,7 +23,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
         libssl-dev \
-        libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -73,11 +72,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pipx install "yt-dlp[default,curl-cffi]" \
     && ln -sf /root/.local/bin/yt-dlp /usr/local/bin/yt-dlp
 
-# Build-time gate: fail loudly if yt-dlp cannot impersonate (curl-cffi missing)
-# or is missing entirely. This is the binary-level half of #10's `ready` tier.
+# Build-time gate: fail loudly if yt-dlp cannot impersonate. This mirrors the
+# boot preflight in lib/insta_mealie/ytdlp_real.ex (T3 / #22): impersonation is
+# treated as unavailable when `--list-impersonate-targets` prints "(unavailable)"
+# OR returns no targets at all (e.g. curl-cffi not importable). A degraded install
+# must never ship, so the build fails here rather than degrading at runtime.
 RUN yt-dlp --version && \
-    if yt-dlp --list-impersonate-targets 2>/dev/null | grep -q "(unavailable)"; then \
-        echo "FAIL: yt-dlp impersonation targets show (unavailable); curl-cffi not importable" >&2; \
+    targets=$(yt-dlp --list-impersonate-targets 2>/dev/null) && \
+    if [ -z "$targets" ] || echo "$targets" | grep -q "(unavailable)"; then \
+        echo "FAIL: yt-dlp impersonation unavailable (curl-cffi missing or no targets); cannot build." >&2; \
+        echo "Fix with: pipx install \"yt-dlp[default,curl-cffi]\"" >&2; \
         exit 1; \
     fi
 
@@ -88,6 +92,13 @@ COPY --from=build /app/_build/prod/rel/insta_mealie ./
 
 EXPOSE 4000
 
-# Required at runtime (config/runtime.exs): DATABASE_URL, SECRET_KEY_BASE, PHX_HOST.
-# PHX_SERVER and PORT are defaulted above; override as needed.
+# Runtime env contract (config/runtime.exs):
+#   SECRET_KEY_BASE - REQUIRED (release will not boot without it; generate with `mix phx.gen.secret`)
+#   PHX_HOST        - optional, defaults to example.com (endpoint URL / cookie domain)
+#   PHX_SERVER/PORT - defaulted above; override as needed
+# Optional client activation (auto-detected when present):
+#   MEALIE_API_TOKEN            -> activates the real Mealie client
+#   OPENAI_API_KEY              -> activates the real LLM client (routing/format/merge)
+#   yt-dlp is baked in via pipx (above); the real YtDlp client auto-activates and runs the boot preflight.
+# No database is required (jobs live in ETS per ADR 0001), so DATABASE_URL is NOT used.
 CMD ["/app/bin/insta_mealie", "start"]

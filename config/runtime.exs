@@ -19,40 +19,10 @@ config :insta_mealie, :insta_mealie,
   ig_cookies_path: System.get_env("IG_COOKIES_PATH"),
   output_language: System.get_env("OUTPUT_LANGUAGE") || "en"
 
-# Real external clients are activated automatically when their binary /
-# credentials are present. This keeps the default (stub) experience
-# zero-config and CI-safe, while a live run happens once Mealie creds are
-# provided and yt-dlp is installed on the host (ADR 0002).
-if config_env() != :test do
-  clients = [
-    mealie: InstaMealie.MealieStub,
-    llm: InstaMealie.LlmStub,
-    ytdlp: InstaMealie.YtDlpStub
-  ]
-
-  clients =
-    if System.get_env("MEALIE_API_TOKEN") not in [nil, ""] do
-      Keyword.put(clients, :mealie, InstaMealie.Mealie.Real)
-    else
-      clients
-    end
-
-  clients =
-    if System.find_executable("yt-dlp") != nil do
-      Keyword.put(clients, :ytdlp, InstaMealie.YtDlp.Real)
-    else
-      clients
-    end
-
-  clients =
-    if System.get_env("INSTA_MEALIE_OPENAI_API_KEY") not in [nil, ""] do
-      Keyword.put(clients, :llm, InstaMealie.Llm.Real)
-    else
-      clients
-    end
-
-  config :insta_mealie, :clients, clients
-end
+config :insta_mealie, :whisper,
+  base_url: System.get_env("WHISPER_BASE_URL") || "",
+  api_key: System.get_env("WHISPER_API_KEY") || "",
+  model: System.get_env("WHISPER_MODEL") || "whisper-1"
 
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the

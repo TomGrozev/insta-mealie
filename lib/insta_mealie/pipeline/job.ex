@@ -9,9 +9,8 @@ defmodule InstaMealie.Pipeline.Job do
   """
   use GenServer
 
-  alias InstaMealie.Pipeline.{JobStore, Clients}
+  alias InstaMealie.Pipeline.{JobStore}
   alias InstaMealie.Llm
-  alias InstaMealie.PubSub
 
   defstruct [
     :id,
@@ -105,7 +104,7 @@ defmodule InstaMealie.Pipeline.Job do
   defp run_caption_format(job) do
     job = set_stage(job, :llm_format, :running) |> persist()
 
-    case Clients.format(job.caption, comments: [], output_language: job.output_language) do
+    case InstaMealie.Llm.format(job.caption, comments: [], output_language: job.output_language) do
       {:ok, envelope} ->
         env = Llm.normalize_envelope(envelope)
 
@@ -158,7 +157,7 @@ defmodule InstaMealie.Pipeline.Job do
   end
 
   defp run_fetch(job) do
-    case Clients.fetch(job) do
+    case InstaMealie.YtDlp.fetch(job.url, []) do
       {:ok, fetch} ->
         job = set_stage(job, :fetch, :done) |> persist()
         run_format(job, fetch)
@@ -173,7 +172,7 @@ defmodule InstaMealie.Pipeline.Job do
 
     job = set_stage(job, :llm_format, :running) |> persist()
 
-    case Clients.format(fetch.caption,
+    case InstaMealie.Llm.format(fetch.caption,
            comments: op_comments,
            output_language: job.output_language
          ) do
@@ -211,7 +210,7 @@ defmodule InstaMealie.Pipeline.Job do
   defp run_transcribe(job, fetch) do
     job = set_stage(job, :transcribe, :running) |> persist()
 
-    case Clients.transcribe(fetch.video_path, []) do
+    case InstaMealie.Whisper.transcribe(fetch.video_path, []) do
       {:ok, transcript} ->
         job = set_stage(job, :transcribe, :done) |> persist()
         run_merge(job, fetch, transcript)
@@ -224,7 +223,7 @@ defmodule InstaMealie.Pipeline.Job do
   defp run_merge(job, fetch, transcript) do
     job = set_stage(job, :llm_merge, :running) |> persist()
 
-    case Clients.merge(fetch.caption, transcript,
+    case InstaMealie.Llm.merge(fetch.caption, transcript,
            output_language: job.output_language,
            draft: job.recipe
          ) do
@@ -251,7 +250,7 @@ defmodule InstaMealie.Pipeline.Job do
     if raw_list == [] do
       run_import(job)
     else
-      case Clients.parse_ingredients(raw_list) do
+      case InstaMealie.Mealie.parse_ingredients(raw_list) do
         {:ok, parsed} ->
           ingredients =
             Enum.with_index(parsed)
@@ -302,7 +301,7 @@ defmodule InstaMealie.Pipeline.Job do
     job = set_stage(job, :mealie_import, :running) |> persist()
     recipe = job.recipe || %{}
 
-    case Clients.import_recipe(recipe) do
+    case InstaMealie.Mealie.import_recipe(recipe) do
       {:ok, slug, deep_link} ->
         job
         |> set_stage(:mealie_import, :done)

@@ -7,6 +7,7 @@ defmodule InstaMealieWeb.JobsLive do
 
   @topic "jobs"
   @retry_cap 2
+  @stages_order [:fetch, :transcribe, :llm_format, :llm_merge, :mealie_import]
 
   @impl true
   def mount(_params, _session, socket) do
@@ -18,7 +19,7 @@ defmodule InstaMealieWeb.JobsLive do
       socket
       |> assign(:form, to_form(%{"url" => ""}, as: :job))
       |> assign(:form_error, nil)
-      |> assign(:degraded, InstaMealie.YtDlp.Real.degraded?())
+      |> assign(:degraded, InstaMealie.YtDlp.Cli.degraded?())
       |> assign(:caption_editing_id, nil)
       |> assign(:caption_form, to_form(%{"caption" => ""}))
       |> stream(:jobs, jobs, reset: true)
@@ -93,20 +94,21 @@ defmodule InstaMealieWeb.JobsLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash}>
-      <div class="space-y-8">
-        <header class="space-y-1">
-          <h1 class="text-2xl font-semibold tracking-tight text-base-content">InstaMealie</h1>
-          <p class="text-sm text-base-content/70">
-            Paste an Instagram reel URL and turn it into a Mealie recipe.
+      <section class="space-y-5">
+        <div class="space-y-2">
+          <h1 class="font-display text-3xl font-semibold tracking-tight text-base-content sm:text-4xl">
+            From reel to recipe.
+          </h1>
+          <p class="max-w-xl text-base-content/70">
+            Paste an Instagram reel and InstaMealie pulls the recipe out of the video — then sends it to Mealie.
           </p>
-        </header>
+        </div>
 
         <%= if @degraded do %>
-          <div class="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800">
-            <p class="font-medium">Caption-only mode</p>
-            <p class="mt-1">
-              yt-dlp browser impersonation is unavailable in this environment, so reel
-              fetching is disabled. Paste a reel caption below to import it without the video.
+          <div class="rounded-2xl border border-warning/30 bg-warning/10 p-4 text-sm">
+            <p class="font-medium text-warning">Caption-only mode</p>
+            <p class="mt-1 text-base-content/70">
+              yt-dlp browser impersonation is unavailable here, so reel fetching is off. Paste a caption to import without the video.
             </p>
           </div>
 
@@ -114,7 +116,7 @@ defmodule InstaMealieWeb.JobsLive do
             for={@caption_form}
             id="caption-create-form"
             phx-submit="create-caption"
-            class="flex items-start gap-2"
+            class="flex flex-col gap-2 sm:flex-row sm:items-start"
           >
             <.input
               field={@caption_form[:caption]}
@@ -122,7 +124,7 @@ defmodule InstaMealieWeb.JobsLive do
               type="textarea"
               rows="3"
               placeholder="Paste the reel caption…"
-              class="w-full rounded-xl border border-base-300 bg-base-100 px-4 py-3 text-base-content placeholder:text-base-content/40 focus:border-primary focus:ring-2 focus:ring-primary/30"
+              class="w-full rounded-xl border border-base-300 bg-base-200 px-4 py-3 text-base-content placeholder:text-base-content/40 focus:border-primary focus:ring-2 focus:ring-primary/30"
             />
             <button
               type="submit"
@@ -136,13 +138,18 @@ defmodule InstaMealieWeb.JobsLive do
             <p class="text-sm text-error">{@form_error}</p>
           <% end %>
         <% else %>
-          <.form for={@form} id="job-form" phx-submit="create" class="flex items-center gap-2">
+          <.form
+            for={@form}
+            id="job-form"
+            phx-submit="create"
+            class="flex flex-col gap-2 sm:flex-row sm:items-center"
+          >
             <div class="relative flex-1">
               <.input
                 field={@form[:url]}
                 type="url"
                 placeholder="https://instagram.com/reel/..."
-                class="w-full rounded-xl border border-base-300 bg-base-100 px-4 py-3 pl-11 text-base-content placeholder:text-base-content/40 focus:border-primary focus:ring-2 focus:ring-primary/30"
+                class="w-full rounded-xl border border-base-300 bg-base-200 px-4 py-3 pl-11 text-base-content placeholder:text-base-content/40 focus:border-primary focus:ring-2 focus:ring-primary/30"
               />
               <span class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-base-content/40">
                 <.icon name="hero-link" class="size-5" />
@@ -150,7 +157,7 @@ defmodule InstaMealieWeb.JobsLive do
             </div>
             <button
               type="submit"
-              class="rounded-xl bg-primary px-5 py-3 font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
+              class="shrink-0 rounded-xl bg-primary px-5 py-3 font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
             >
               Create job
             </button>
@@ -161,35 +168,91 @@ defmodule InstaMealieWeb.JobsLive do
           <% end %>
         <% end %>
 
-        <section class="space-y-3">
-          <h2 class="text-xs font-semibold uppercase tracking-wider text-base-content/50">
-            Recent jobs
-          </h2>
+        <div class="rounded-2xl border border-base-300/60 bg-base-200/40 p-4">
+          <p class="mb-3 text-xs font-medium uppercase tracking-wider text-base-content/45">
+            The pipeline
+          </p>
+          <.pipeline_strip stages={%{}} ghost={true} />
+        </div>
+      </section>
 
-          <div id="jobs" phx-update="stream" class="space-y-3">
-            <div :for={{id, job} <- @streams.jobs} id={id}>
-              <.job_card
-                job={job}
-                caption_form={@caption_form}
-                caption_editing_id={@caption_editing_id}
-              />
-            </div>
+      <section class="space-y-3">
+        <h2 class="text-xs font-semibold uppercase tracking-wider text-base-content/50">
+          Recent jobs
+        </h2>
+
+        <div id="jobs" phx-update="stream" class="space-y-3">
+          <div :for={{id, job} <- @streams.jobs} id={id}>
+            <.job_card
+              job={job}
+              caption_form={@caption_form}
+              caption_editing_id={@caption_editing_id}
+            />
           </div>
+        </div>
 
-          <%= if @jobs_empty? do %>
-            <p class="rounded-2xl border border-dashed border-base-300 bg-base-100/50 p-6 text-center text-sm text-base-content/50">
-              No jobs yet — paste a reel URL above to begin.
-            </p>
-          <% end %>
-        </section>
-      </div>
+        <%= if @jobs_empty? do %>
+          <p class="rounded-2xl border border-dashed border-base-300 bg-base-200/30 p-6 text-center text-sm text-base-content/50">
+            No jobs yet — paste a reel URL above to begin.
+          </p>
+        <% end %>
+      </section>
     </Layouts.app>
+    """
+  end
+
+  attr :stages, :map, default: %{}
+  attr :ghost, :boolean, default: false
+
+  def pipeline_strip(assigns) do
+    assigns = assign(assigns, :stages_order, @stages_order)
+
+    ~H"""
+    <div class="space-y-1.5">
+      <div class="flex items-center">
+        <%= for {stage, idx} <- Enum.with_index(@stages_order) do %>
+          <% status = if @ghost, do: :ghost, else: Map.get(@stages, stage, :pending) %>
+          <div
+            data-stage={stage}
+            class={node_classes(status)}
+            title={stage_label(stage)}
+            aria-label={stage_label(stage)}
+          >
+            <%= cond do %>
+              <% status == :done -> %>
+                <.icon name="hero-check" class="size-3.5" />
+              <% status == :running -> %>
+                <.icon name="hero-arrow-path" class="size-3.5 motion-safe:animate-spin" />
+              <% status == :failed -> %>
+                <.icon name="hero-x-mark" class="size-3.5" />
+              <% status == :skipped -> %>
+                <.icon name="hero-minus" class="size-3.5" />
+              <% true -> %>
+                <span class="size-2 rounded-full bg-current"></span>
+            <% end %>
+          </div>
+          <%= if idx < length(@stages_order) - 1 do %>
+            <div class={connector_classes(status)} />
+          <% end %>
+        <% end %>
+      </div>
+      <div class="flex">
+        <%= for {stage, idx} <- Enum.with_index(@stages_order) do %>
+          <div class="flex-1 text-center text-[10px] font-medium uppercase tracking-wide text-base-content/45">
+            {stage_label(stage)}
+          </div>
+          <%= if idx < length(@stages_order) - 1 do %>
+            <div class="flex-1"></div>
+          <% end %>
+        <% end %>
+      </div>
+    </div>
     """
   end
 
   def job_card(assigns) do
     ~H"""
-    <div class="rounded-2xl border border-base-300 bg-base-100 p-4 shadow-sm">
+    <div class="rounded-2xl border border-base-300/70 bg-base-200/50 p-4 shadow-sm transition hover:border-base-300">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
           <p class="truncate text-sm font-medium text-base-content">
@@ -221,12 +284,8 @@ defmodule InstaMealieWeb.JobsLive do
         <% end %>
       </div>
 
-      <div class="mt-3 flex flex-wrap gap-2">
-        <%= for stage <- [:fetch, :transcribe, :llm_format, :llm_merge, :mealie_import] do %>
-          <span data-stage={stage} class={stage_chip_class(Map.get(@job.stages, stage, :pending))}>
-            {stage_label(stage)}
-          </span>
-        <% end %>
+      <div class="mt-3">
+        <.pipeline_strip stages={@job.stages} />
       </div>
 
       <%= if @job.state == :failed do %>
@@ -414,21 +473,35 @@ defmodule InstaMealieWeb.JobsLive do
     end
   end
 
-  defp stage_chip_class(:done),
-    do: "rounded-full bg-success/15 px-2.5 py-1 text-xs font-medium text-success"
+  # ---- Pipeline strip helpers ----
 
-  defp stage_chip_class(:skipped),
+  defp node_classes(:done),
     do:
-      "rounded-full bg-base-200 px-2.5 py-1 text-xs font-medium text-base-content/50 line-through"
+      "flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-content"
 
-  defp stage_chip_class(:running),
-    do: "rounded-full bg-primary/15 px-2.5 py-1 text-xs font-medium text-primary"
+  defp node_classes(:running),
+    do:
+      "flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary ring-2 ring-primary/60"
 
-  defp stage_chip_class(:failed),
-    do: "rounded-full bg-error/15 px-2.5 py-1 text-xs font-medium text-error"
+  defp node_classes(:failed),
+    do:
+      "flex size-7 shrink-0 items-center justify-center rounded-full bg-error text-error-content"
 
-  defp stage_chip_class(:pending),
-    do: "rounded-full bg-base-200 px-2.5 py-1 text-xs font-medium text-base-content/40"
+  defp node_classes(:skipped),
+    do:
+      "flex size-7 shrink-0 items-center justify-center rounded-full bg-base-300 text-base-content/40"
+
+  defp node_classes(:ghost),
+    do:
+      "flex size-7 shrink-0 items-center justify-center rounded-full bg-base-300/70 text-base-content/40"
+
+  defp node_classes(_),
+    do:
+      "flex size-7 shrink-0 items-center justify-center rounded-full bg-base-300 text-base-content/40"
+
+  defp connector_classes(:done), do: "h-0.5 flex-1 rounded-full bg-primary"
+  defp connector_classes(:ghost), do: "h-0.5 flex-1 rounded-full bg-base-300/70"
+  defp connector_classes(_), do: "h-0.5 flex-1 rounded-full bg-base-300"
 
   defp stage_label(:fetch), do: "Fetch"
   defp stage_label(:transcribe), do: "Transcribe"
