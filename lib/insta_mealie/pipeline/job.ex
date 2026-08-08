@@ -154,7 +154,10 @@ defmodule InstaMealie.Pipeline.Job do
   defp run_merge(job, fetch, transcript) do
     job = set_stage(job, :llm_merge, :running) |> persist()
 
-    case Clients.merge(fetch.caption, transcript, output_language: job.output_language) do
+    case Clients.merge(fetch.caption, transcript,
+           output_language: job.output_language,
+           draft: job.recipe
+         ) do
       {:ok, envelope} ->
         env = Llm.normalize_envelope(envelope)
 

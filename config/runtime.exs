@@ -44,6 +44,13 @@ if config_env() != :test do
       clients
     end
 
+  clients =
+    if System.get_env("INSTA_MEALIE_OPENAI_API_KEY") not in [nil, ""] do
+      Keyword.put(clients, :llm, InstaMealie.Llm.Real)
+    else
+      clients
+    end
+
   config :insta_mealie, :clients, clients
 end
 

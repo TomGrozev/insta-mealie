@@ -12,7 +12,7 @@ defmodule InstaMealie.Mealie.Real do
   """
   @behaviour InstaMealie.Mealie
 
-  @payload_keys ~w(name description recipeYield recipeIngredient recipeInstructions tags categories notes)
+  @payload_keys ~w(name description recipeYield recipeIngredient recipeInstructions tags categories notes totalTime prepTime cookTime performTime)
 
   @impl true
   def create_recipe(recipe) when is_map(recipe) do
