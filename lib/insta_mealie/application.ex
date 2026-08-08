@@ -5,6 +5,8 @@ defmodule InstaMealie.Application do
 
   @impl true
   def start(_type, _args) do
+    maybe_run_preflight()
+
     children = [
       InstaMealieWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:insta_mealie, :dns_cluster_query) || :ignore},
@@ -15,6 +17,17 @@ defmodule InstaMealie.Application do
 
     opts = [strategy: :one_for_one, name: InstaMealie.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp maybe_run_preflight do
+    if Application.get_env(:insta_mealie, :skip_preflight, false) do
+      :ok
+    else
+      case Application.get_env(:insta_mealie, :clients, [])[:ytdlp] do
+        InstaMealie.YtDlp.Real -> InstaMealie.YtDlp.Real.preflight!()
+        _ -> :ok
+      end
+    end
   end
 
   @impl true

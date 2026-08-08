@@ -8,6 +8,8 @@ defmodule InstaMealie.Pipeline.Clients do
   def create_recipe(recipe), do: client(:mealie).create_recipe(recipe)
   def update_recipe(slug, recipe), do: client(:mealie).update_recipe(slug, recipe)
   def deep_link(slug), do: client(:mealie).deep_link(slug)
+  def search_foods(term), do: client(:mealie).search_foods(term)
+  def search_units(term), do: client(:mealie).search_units(term)
 
   def import_recipe(recipe) do
     with {:ok, slug} <- create_recipe(recipe),

@@ -80,6 +80,26 @@ defmodule InstaMealie.Pipeline do
   def list_recent_jobs, do: JobStore.list()
 
   @doc """
+  Whether a pipeline error class represents a retryable failure (vs. a dead
+  row). `validation` is terminal; `network` / `auth` and the other transient
+  classes are retryable. Consumed by the retry UI (later ticket).
+  """
+  def error_retryable?(class)
+      when class in [
+             :network,
+             :auth,
+             :timeout,
+             :rate_limited,
+             :ip_banned,
+             :cookie_expired,
+             :api_error
+           ],
+      do: true
+
+  def error_retryable?(:validation), do: false
+  def error_retryable?(_), do: false
+
+  @doc """
   Retry a job from the start, preserving its `job_id`. Full retry semantics
   (per-stage cap, CTA matrix) land in a later ticket; this resets and re-runs.
   """
