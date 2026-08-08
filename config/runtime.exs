@@ -3,12 +3,12 @@ import Config
 # InstaMealie external service configuration — read from the environment at runtime
 # so a release can be configured without recompiling. Secrets are never hard-coded.
 config :insta_mealie, :openai,
-  base_url: System.get_env("INSTA_MEALIE_OPENAI_BASE_URL") || "https://api.openai.com/v1",
-  api_key: System.get_env("INSTA_MEALIE_OPENAI_API_KEY") || "",
-  model: System.get_env("INSTA_MEALIE_OPENAI_MODEL") || "gpt-4o-mini",
+  base_url: System.get_env("OPENAI_BASE_URL") || "https://api.openai.com/v1",
+  api_key: System.get_env("OPENAI_API_KEY") || "",
+  model: System.get_env("OPENAI_MODEL") || "gpt-4o-mini",
   merge_model:
-    System.get_env("INSTA_MEALIE_OPENAI_MERGE_MODEL") ||
-      System.get_env("INSTA_MEALIE_OPENAI_MODEL") || "gpt-4o-mini"
+    System.get_env("OPENAI_MERGE_MODEL") ||
+      System.get_env("OPENAI_MODEL") || "gpt-4o-mini"
 
 config :insta_mealie, :mealie,
   base_url: System.get_env("MEALIE_BASE_URL") || "http://localhost:9000",
@@ -16,8 +16,8 @@ config :insta_mealie, :mealie,
   group_slug: System.get_env("MEALIE_GROUP_SLUG") || "home"
 
 config :insta_mealie, :insta_mealie,
-  ig_cookies_path: System.get_env("INSTA_MEALIE_IG_COOKIES_PATH"),
-  output_language: System.get_env("INSTA_MEALIE_OUTPUT_LANGUAGE") || "en"
+  ig_cookies_path: System.get_env("IG_COOKIES_PATH"),
+  output_language: System.get_env("OUTPUT_LANGUAGE") || "en"
 
 # Real external clients are activated automatically when their binary /
 # credentials are present. This keeps the default (stub) experience
