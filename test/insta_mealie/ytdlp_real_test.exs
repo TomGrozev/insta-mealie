@@ -1,61 +1,61 @@
-defmodule InstaMealie.YtDlp.RealTest do
+defmodule InstaMealie.YtDlp.CliTest do
   use ExUnit.Case, async: false
 
-  alias InstaMealie.YtDlp.Real
+  alias InstaMealie.YtDlp.Cli
 
   describe "classify_fetch_error/1" do
     test "network errors" do
-      assert Real.classify_fetch_error("ERROR: Unable to download; connection reset by peer") ==
+      assert Cli.classify_fetch_error("ERROR: Unable to download; connection reset by peer") ==
                :network
 
-      assert Real.classify_fetch_error("TimeoutError: HTTPSConnectionPool timed out") == :network
-      assert Real.classify_fetch_error("Could not resolve host instagram.com") == :network
+      assert Cli.classify_fetch_error("TimeoutError: HTTPSConnectionPool timed out") == :network
+      assert Cli.classify_fetch_error("Could not resolve host instagram.com") == :network
     end
 
     test "rate limited" do
-      assert Real.classify_fetch_error("ERROR: You are being rate-limited, please slow down") ==
+      assert Cli.classify_fetch_error("ERROR: You are being rate-limited, please slow down") ==
                :rate_limited
 
-      assert Real.classify_fetch_error("HTTP Error 429: Too Many Requests") == :rate_limited
+      assert Cli.classify_fetch_error("HTTP Error 429: Too Many Requests") == :rate_limited
     end
 
     test "cookie / auth required" do
-      assert Real.classify_fetch_error("ERROR: Login required, please log in first") ==
+      assert Cli.classify_fetch_error("ERROR: Login required, please log in first") ==
                :cookie_expired
 
-      assert Real.classify_fetch_error("Authentication failed; cookies expired") ==
+      assert Cli.classify_fetch_error("Authentication failed; cookies expired") ==
                :cookie_expired
     end
 
     test "ip banned / blocked" do
-      assert Real.classify_fetch_error("ERROR: Your IP address has been blocked") == :ip_banned
-      assert Real.classify_fetch_error("Access denied: 403 Forbidden") == :ip_banned
+      assert Cli.classify_fetch_error("ERROR: Your IP address has been blocked") == :ip_banned
+      assert Cli.classify_fetch_error("Access denied: 403 Forbidden") == :ip_banned
     end
 
     test "extraction fallback" do
-      assert Real.classify_fetch_error("ERROR: Unable to extract video data") == :extraction
-      assert Real.classify_fetch_error("This video is private") == :extraction
-      assert Real.classify_fetch_error("some unknown failure") == :extraction
+      assert Cli.classify_fetch_error("ERROR: Unable to extract video data") == :extraction
+      assert Cli.classify_fetch_error("This video is private") == :extraction
+      assert Cli.classify_fetch_error("some unknown failure") == :extraction
     end
   end
 
   describe "parse_version/1" do
     test "parses dotted dates" do
-      assert Real.parse_version("2026.07.04") == {2026, 7, 4}
-      assert Real.parse_version("2026.8.1") == {2026, 8, 1}
+      assert Cli.parse_version("2026.07.04") == {2026, 7, 4}
+      assert Cli.parse_version("2026.8.1") == {2026, 8, 1}
     end
 
     test "parses hyphenated versions" do
-      assert Real.parse_version("2026-07-04") == {2026, 7, 4}
+      assert Cli.parse_version("2026-07-04") == {2026, 7, 4}
     end
 
     test "parses two-part versions" do
-      assert Real.parse_version("2026.7") == {2026, 7, 0}
+      assert Cli.parse_version("2026.7") == {2026, 7, 0}
     end
 
     test "rejects unparseable" do
-      assert Real.parse_version("not-a-version") == :unknown
-      assert Real.parse_version("abc.def.ghi") == :unknown
+      assert Cli.parse_version("not-a-version") == :unknown
+      assert Cli.parse_version("abc.def.ghi") == :unknown
     end
   end
 
@@ -70,12 +70,12 @@ defmodule InstaMealie.YtDlp.RealTest do
         )
 
       File.write!(cookie, "dummy")
-      args = Real.maybe_add_cookies(["--no-playlist"], cookies_path: cookie)
+      args = Cli.maybe_add_cookies(["--no-playlist"], cookies_path: cookie)
       assert args == ["--no-playlist", "--cookies", cookie]
     end
 
     test "omits cookies when opts path missing" do
-      args = Real.maybe_add_cookies(["--no-playlist"], cookies_path: "/no/such/file.txt")
+      args = Cli.maybe_add_cookies(["--no-playlist"], cookies_path: "/no/such/file.txt")
       assert args == ["--no-playlist"]
     end
 
@@ -91,7 +91,7 @@ defmodule InstaMealie.YtDlp.RealTest do
       File.write!(cookie, "dummy")
       original_config = Application.get_env(:insta_mealie, :insta_mealie, [])
       Application.put_env(:insta_mealie, :insta_mealie, ig_cookies_path: cookie)
-      args = Real.maybe_add_cookies(["x"], [])
+      args = Cli.maybe_add_cookies(["x"], [])
       assert args == ["x", "--cookies", cookie]
       Application.put_env(:insta_mealie, :insta_mealie, original_config)
     end
@@ -100,10 +100,10 @@ defmodule InstaMealie.YtDlp.RealTest do
   describe "preflight!/0" do
     test "raises with install hint when yt-dlp is missing, otherwise caches and cleans up" do
       if System.find_executable("yt-dlp") == nil do
-        assert_raise RuntimeError, ~r/pipx install/, fn -> Real.preflight!() end
+        assert_raise RuntimeError, ~r/pipx install/, fn -> Cli.preflight!() end
       else
         try do
-          Real.preflight!()
+          Cli.preflight!()
         rescue
           _ -> :ok
         end

@@ -2,7 +2,6 @@ defmodule InstaMealieWeb.ReviewLive do
   use InstaMealieWeb, :live_view
 
   alias InstaMealie.Pipeline
-  alias InstaMealie.Pipeline.Clients
   alias InstaMealie.PubSub
 
   @impl true
@@ -191,7 +190,7 @@ defmodule InstaMealieWeb.ReviewLive do
         <%= if @imported do %>
           <div class="space-y-4">
             <div class="rounded-2xl border border-success/30 bg-success/5 p-6 text-center">
-              <p class="text-lg font-semibold text-success">Recipe imported!</p>
+              <p class="font-display text-lg font-semibold text-success">Recipe imported!</p>
               <%= if @deep_link do %>
                 <a
                   href={@deep_link}
@@ -211,7 +210,7 @@ defmodule InstaMealieWeb.ReviewLive do
           <%= if @dead do %>
             <div class="space-y-4">
               <div class="rounded-2xl border border-error/30 bg-error/5 p-6 text-center">
-                <p class="text-lg font-semibold text-error">Import failed</p>
+                <p class="font-display text-lg font-semibold text-error">Import failed</p>
                 <p class="mt-1 text-sm text-base-content/70">
                   The recipe was rejected by Mealie. Fix the source and create a new job.
                 </p>
@@ -224,7 +223,7 @@ defmodule InstaMealieWeb.ReviewLive do
             <%= if @import_error do %>
               <div class="space-y-4">
                 <div class="rounded-2xl border border-error/30 bg-error/5 p-6">
-                  <p class="text-lg font-semibold text-error">Import error</p>
+                  <p class="font-display text-lg font-semibold text-error">Import error</p>
                   <p class="mt-1 text-sm text-base-content/70">
                     {to_string(@import_error)} error during import. You can retry.
                   </p>
@@ -244,7 +243,7 @@ defmodule InstaMealieWeb.ReviewLive do
             <% else %>
               <div class="space-y-6">
                 <div>
-                  <h1 class="text-xl font-semibold text-base-content">
+                  <h1 class="font-display text-2xl font-semibold text-base-content">
                     Ingredient Review
                   </h1>
                   <p class="mt-1 text-sm text-base-content/60">
@@ -478,7 +477,7 @@ defmodule InstaMealieWeb.ReviewLive do
   end
 
   defp search_foods_safe(term) do
-    case Clients.search_foods(term) do
+    case InstaMealie.Mealie.search_foods(term) do
       {:ok, list} when is_list(list) ->
         Enum.map(list, fn
           %{"name" => name} -> name
@@ -494,7 +493,7 @@ defmodule InstaMealieWeb.ReviewLive do
   end
 
   defp search_units_safe(term) do
-    case Clients.search_units(term) do
+    case InstaMealie.Mealie.search_units(term) do
       {:ok, list} when is_list(list) ->
         Enum.map(list, fn
           %{"name" => name} -> name

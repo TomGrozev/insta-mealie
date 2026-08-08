@@ -1,21 +1,9 @@
 defmodule InstaMealie.PipelineCaptionTest do
-  use ExUnit.Case, async: false
+  use InstaMealie.TestCase
 
   alias InstaMealie.Pipeline
   alias InstaMealie.Pipeline.Job
   alias InstaMealie.Pipeline.JobStore
-
-  setup do
-    JobStore.clear()
-
-    Application.put_env(:insta_mealie, :clients,
-      mealie: InstaMealie.MealieStub,
-      llm: InstaMealie.LlmStub,
-      ytdlp: InstaMealie.YtDlpStub
-    )
-
-    :ok
-  end
 
   describe "degraded / caption-only create (no URL)" do
     test "create_job with a caption runs caption-only routing and imports on recipe_complete" do
@@ -39,13 +27,12 @@ defmodule InstaMealie.PipelineCaptionTest do
     test "submit_caption re-runs caption-only routing on the same job_id" do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
 
-      Application.put_env(:insta_mealie, :clients,
-        mealie: InstaMealie.MealieStub,
-        llm: InstaMealie.LlmStub,
-        ytdlp: InstaMealie.Test.YtDlpFetchNetworkDouble
-      )
+      Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+        {:error, :network, "could not reach instagram"}
+      end)
 
       assert {:ok, id} = Pipeline.create_job(%{url: "https://instagram.com/reel/abc"})
+
       assert_receive {:job_updated, %Job{id: ^id, state: :failed} = failed}, 5000
       assert failed.error_stage == :fetch
 
@@ -76,13 +63,26 @@ defmodule InstaMealie.PipelineCaptionTest do
     test "a caption without a complete recipe fails with :incomplete_caption (non-retryable)" do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
 
-      Application.put_env(:insta_mealie, :clients,
-        mealie: InstaMealie.MealieStub,
-        llm: InstaMealie.Test.LlmNoRecipeDouble,
-        ytdlp: InstaMealie.YtDlpStub
-      )
+      Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+        {:ok,
+         %{
+           "choices" => [
+             %{
+               "message" => %{
+                 "content" =>
+                   Jason.encode!(%{
+                     "completeness" => "no_recipe",
+                     "missing_fields" => ["recipeIngredient", "recipeInstructions"],
+                     "recipe" => %{}
+                   })
+               }
+             }
+           ]
+         }}
+      end)
 
       assert {:ok, id} = Pipeline.create_job(%{caption: "just a nice photo"})
+
       assert_receive {:job_updated, %Job{id: ^id, state: :failed} = job}, 5000
 
       assert job.error_stage == :llm_format

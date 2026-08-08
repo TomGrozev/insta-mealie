@@ -1,35 +1,14 @@
 defmodule InstaMealie.LlmRealTest do
   use ExUnit.Case, async: true
 
-  alias InstaMealie.Llm.Real
-
-  @openai_config [
-    base_url: "http://localhost:12345",
-    api_key: "test-key",
-    model: "test-model",
-    merge_model: "test-merge-model"
-  ]
+  alias InstaMealie.Llm
 
   setup do
-    # Swap HTTP adapter to the test stub
-    original_adapter = Application.get_env(:insta_mealie, :llm_http_adapter)
-    Application.put_env(:insta_mealie, :llm_http_adapter, InstaMealie.Test.LlmHttpStub)
-
-    # Ensure :openai config exists
-    original_openai = Application.get_env(:insta_mealie, :openai)
-    Application.put_env(:insta_mealie, :openai, @openai_config)
-
     on_exit(fn ->
-      if original_adapter do
-        Application.put_env(:insta_mealie, :llm_http_adapter, original_adapter)
-      else
+      try do
         Application.delete_env(:insta_mealie, :llm_http_adapter)
-      end
-
-      if original_openai do
-        Application.put_env(:insta_mealie, :openai, original_openai)
-      else
-        Application.delete_env(:insta_mealie, :openai)
+      rescue
+        _ -> :ok
       end
     end)
 
@@ -46,7 +25,7 @@ defmodule InstaMealie.LlmRealTest do
         "recipe" => %{"name" => "Test Recipe", "recipeIngredient" => ["flour"]}
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
 
       assert result.completeness == :recipe_complete
       assert result.missing_fields == []
@@ -61,7 +40,7 @@ defmodule InstaMealie.LlmRealTest do
         "recipe" => %{"name" => "Partial Recipe"}
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
 
       assert result.completeness == :recipe_partial
       assert result.missing_fields == [:recipeInstructions]
@@ -75,7 +54,7 @@ defmodule InstaMealie.LlmRealTest do
         "recipe" => %{}
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
 
       assert result.completeness == :no_recipe
       assert result.missing_fields == []
@@ -89,7 +68,7 @@ defmodule InstaMealie.LlmRealTest do
         "recipe" => %{}
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
       refute Map.has_key?(result.recipe, "name")
     end
 
@@ -100,19 +79,19 @@ defmodule InstaMealie.LlmRealTest do
         "recipe" => %{"name" => "X"}
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
       assert result.missing_fields == [:recipeIngredient, :recipeInstructions]
     end
 
-    test "unknown completeness defaults to :no_recipe" do
+    test "unknown completeness defaults to :unknown" do
       json = %{
         "completeness" => "something_weird",
         "missing_fields" => [],
         "recipe" => %{"name" => "X"}
       }
 
-      result = Real.envelope_from_json(json)
-      assert result.completeness == :no_recipe
+      result = Llm.envelope_from_json(json)
+      assert result.completeness == :unknown
     end
 
     test "missing recipe defaults to empty map" do
@@ -121,7 +100,7 @@ defmodule InstaMealie.LlmRealTest do
         "missing_fields" => []
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
       assert result.recipe == %{}
     end
 
@@ -131,7 +110,7 @@ defmodule InstaMealie.LlmRealTest do
         "recipe" => %{"name" => "X"}
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
       assert result.missing_fields == []
     end
   end
@@ -149,7 +128,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
       assert result.recipe["totalTime"] == "PT1H20M"
     end
 
@@ -163,7 +142,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
       assert result.recipe["totalTime"] == "PT40M"
     end
 
@@ -177,7 +156,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
       assert result.recipe["prepTime"] == "PT1H"
     end
 
@@ -191,7 +170,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
       assert result.recipe["cookTime"] == "PT1H20M"
     end
 
@@ -205,7 +184,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
       assert result.recipe["performTime"] == "PT1H20M"
     end
 
@@ -219,7 +198,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
       assert result.recipe["totalTime"] == "PT2H"
     end
 
@@ -233,7 +212,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
       assert result.recipe["totalTime"] == "PT1H30M"
     end
 
@@ -247,7 +226,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
       assert result.recipe["totalTime"] == "PT1H30M"
     end
 
@@ -261,7 +240,7 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
       assert result.recipe["totalTime"] == "until done"
     end
 
@@ -275,15 +254,15 @@ defmodule InstaMealie.LlmRealTest do
         }
       }
 
-      result = Real.envelope_from_json(json)
+      result = Llm.envelope_from_json(json)
       refute Map.has_key?(result.recipe, "totalTime")
     end
   end
 
-  # ── format/2 end-to-end with stubbed HTTP ──────────────────────────
+  # ── format/2 end-to-end with adapter stub ────────────────────────
 
   describe "format/2" do
-    test "returns envelope from canned response" do
+    test "returns envelope from stubbed response" do
       envelope_json =
         Jason.encode!(%{
           "completeness" => "recipe_complete",
@@ -297,14 +276,15 @@ defmodule InstaMealie.LlmRealTest do
           }
         })
 
-      canned = %{
-        "choices" => [%{"message" => %{"content" => envelope_json}}]
-      }
-
-      Application.put_env(:insta_mealie, :llm_canned_response, canned)
+      Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+        {:ok,
+         %{
+           "choices" => [%{"message" => %{"content" => envelope_json}}]
+         }}
+      end)
 
       assert {:ok, result} =
-               Real.format("Pasta recipe caption", output_language: "en", comments: [])
+               Llm.format("Pasta recipe caption", output_language: "en", comments: [])
 
       assert result.completeness == :recipe_complete
       assert result.recipe["name"] == "Pasta Aglio e Olio"
@@ -325,13 +305,14 @@ defmodule InstaMealie.LlmRealTest do
           "recipe" => %{"name" => "Test"}
         })
 
-      canned = %{
-        "choices" => [%{"message" => %{"content" => envelope_json}}]
-      }
+      Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+        {:ok,
+         %{
+           "choices" => [%{"message" => %{"content" => envelope_json}}]
+         }}
+      end)
 
-      Application.put_env(:insta_mealie, :llm_canned_response, canned)
-
-      assert {:ok, result} = Real.format("Test caption", output_language: "fr", comments: [])
+      assert {:ok, result} = Llm.format("Test caption", output_language: "fr", comments: [])
       assert result.recipe["name"] == "Test"
     end
 
@@ -343,19 +324,20 @@ defmodule InstaMealie.LlmRealTest do
           "recipe" => %{}
         })
 
-      canned = %{
-        "choices" => [%{"message" => %{"content" => envelope_json}}]
-      }
+      Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+        {:ok,
+         %{
+           "choices" => [%{"message" => %{"content" => envelope_json}}]
+         }}
+      end)
 
-      Application.put_env(:insta_mealie, :llm_canned_response, canned)
-
-      assert {:ok, result} = Real.format("No recipe here", output_language: "en", comments: [])
+      assert {:ok, result} = Llm.format("No recipe here", output_language: "en", comments: [])
       assert result.completeness == :no_recipe
       assert result.recipe == %{}
     end
   end
 
-  # ── merge/3 end-to-end with stubbed HTTP ──────────────────────────
+  # ── merge/3 end-to-end with adapter stub ────────────────────────
 
   describe "merge/3" do
     test "merges with draft into complete envelope" do
@@ -372,16 +354,17 @@ defmodule InstaMealie.LlmRealTest do
           }
         })
 
-      canned = %{
-        "choices" => [%{"message" => %{"content" => envelope_json}}]
-      }
-
-      Application.put_env(:insta_mealie, :llm_canned_response, canned)
+      Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+        {:ok,
+         %{
+           "choices" => [%{"message" => %{"content" => envelope_json}}]
+         }}
+      end)
 
       draft = %{"name" => "Partial Draft", "recipeIngredient" => ["ingredient1"]}
 
       assert {:ok, result} =
-               Real.merge(
+               Llm.merge(
                  "Original caption",
                  "Transcript of the voiceover",
                  output_language: "en",
@@ -400,14 +383,15 @@ defmodule InstaMealie.LlmRealTest do
           "recipe" => %{"name" => "From Transcript Only"}
         })
 
-      canned = %{
-        "choices" => [%{"message" => %{"content" => envelope_json}}]
-      }
-
-      Application.put_env(:insta_mealie, :llm_canned_response, canned)
+      Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+        {:ok,
+         %{
+           "choices" => [%{"message" => %{"content" => envelope_json}}]
+         }}
+      end)
 
       assert {:ok, result} =
-               Real.merge("Caption", "Transcript", output_language: "en")
+               Llm.merge("Caption", "Transcript", output_language: "en")
 
       assert result.recipe["name"] == "From Transcript Only"
     end
@@ -417,23 +401,14 @@ defmodule InstaMealie.LlmRealTest do
 
   describe "malformed response handling" do
     test "format returns api_error on non-JSON completion" do
-      original_canned = Application.get_env(:insta_mealie, :llm_canned_response)
-
-      canned = %{
-        "choices" => [%{"message" => %{"content" => "this is not json"}}]
-      }
-
-      Application.put_env(:insta_mealie, :llm_canned_response, canned)
-
-      on_exit(fn ->
-        if original_canned do
-          Application.put_env(:insta_mealie, :llm_canned_response, original_canned)
-        else
-          Application.delete_env(:insta_mealie, :llm_canned_response)
-        end
+      Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+        {:ok,
+         %{
+           "choices" => [%{"message" => %{"content" => "this is not json"}}]
+         }}
       end)
 
-      assert {:error, :api_error, _} = Real.format("x", output_language: "en")
+      assert {:error, :api_error, _} = Llm.format("x", output_language: "en")
     end
   end
 
@@ -441,36 +416,21 @@ defmodule InstaMealie.LlmRealTest do
 
   describe "error handling" do
     test "format returns error tuple on HTTP failure" do
-      # Use a stub that returns an error
-      original = Application.get_env(:insta_mealie, :llm_http_adapter)
-      Application.put_env(:insta_mealie, :llm_http_adapter, InstaMealie.Test.LlmErrorStub)
-
-      on_exit(fn ->
-        if original do
-          Application.put_env(:insta_mealie, :llm_http_adapter, original)
-        else
-          Application.delete_env(:insta_mealie, :llm_http_adapter)
-        end
+      Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+        {:error, :auth, "unauthorized"}
       end)
 
       assert {:error, :auth, "unauthorized"} =
-               Real.format("test", output_language: "en", comments: [])
+               Llm.format("test", output_language: "en", comments: [])
     end
 
     test "merge returns error tuple on HTTP failure" do
-      original = Application.get_env(:insta_mealie, :llm_http_adapter)
-      Application.put_env(:insta_mealie, :llm_http_adapter, InstaMealie.Test.LlmErrorStub)
-
-      on_exit(fn ->
-        if original do
-          Application.put_env(:insta_mealie, :llm_http_adapter, original)
-        else
-          Application.delete_env(:insta_mealie, :llm_http_adapter)
-        end
+      Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+        {:error, :auth, "unauthorized"}
       end)
 
       assert {:error, :auth, "unauthorized"} =
-               Real.merge("caption", "transcript", output_language: "en")
+               Llm.merge("caption", "transcript", output_language: "en")
     end
   end
 end

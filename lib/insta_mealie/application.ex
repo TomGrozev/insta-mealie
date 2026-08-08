@@ -23,8 +23,8 @@ defmodule InstaMealie.Application do
     if Application.get_env(:insta_mealie, :skip_preflight, false) do
       :ok
     else
-      case Application.get_env(:insta_mealie, :clients, [])[:ytdlp] do
-        InstaMealie.YtDlp.Real -> InstaMealie.YtDlp.Real.preflight!()
+      case Application.get_env(:insta_mealie, InstaMealie.YtDlp, InstaMealie.YtDlp.Cli) do
+        InstaMealie.YtDlp.Cli -> InstaMealie.YtDlp.Cli.preflight!()
         _ -> :ok
       end
     end

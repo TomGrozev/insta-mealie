@@ -71,13 +71,14 @@ end
 defmodule InstaMealie.Mealie.RealTest do
   use ExUnit.Case, async: false
 
-  alias InstaMealie.Mealie.Real
+  alias InstaMealie.Mealie
   alias InstaMealie.Pipeline
   alias InstaMealie.Pipeline.Job
   alias InstaMealie.Pipeline.JobStore
   alias InstaMealie.PubSub
 
   setup do
+    Mox.set_mox_global()
     JobStore.clear()
 
     {:ok, sock} = :gen_tcp.listen(0, [])
@@ -87,25 +88,92 @@ defmodule InstaMealie.Mealie.RealTest do
     {:ok, pid} = Bandit.start_link(plug: FakeMealie, port: port)
 
     base = "http://127.0.0.1:#{port}"
-    original_clients = Application.get_env(:insta_mealie, :clients, [])
-    original_mealie = Application.get_env(:insta_mealie, :mealie, [])
 
+    # Set mealie config WITHOUT :plug — default Req adapter hits the fake server
     Application.put_env(:insta_mealie, :mealie,
       base_url: base,
       api_token: "test-token",
       group_slug: "home"
     )
 
-    Application.put_env(:insta_mealie, :clients,
-      mealie: InstaMealie.Mealie.Real,
-      llm: InstaMealie.LlmStub,
-      ytdlp: InstaMealie.YtDlpStub
-    )
+    # Use Mock for YtDlp only
+    Application.put_env(:insta_mealie, InstaMealie.YtDlp, InstaMealie.YtDlp.Mock)
+
+    # Register YtDlp mock to return canned data
+    Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+      caption = """
+      Homemade Granola
+      Makes about 8 servings.
+      Ingredients:
+      - 3 cups rolled oats
+      - 1 cup raw almonds
+      - 1/2 cup maple syrup
+      - 1/3 cup coconut oil
+      - 1 tsp salt
+      Steps:
+      Mix everything, spread on a tray, bake at 160C for 40 minutes stirring halfway.
+      """
+
+      {:ok,
+       %{
+         author: "chef_og",
+         caption: caption,
+         comments: [
+           %{author: "chef_og", text: "So good, I add cranberries!"},
+           %{author: "random_fan", text: "tried this, loved it"},
+           %{author: "chef_og", text: "Tip: use parchment paper."}
+         ],
+         video_path:
+           "/tmp/insta_mealie/" <>
+             (:crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)) <> ".mp4"
+       }}
+    end)
+
+    # Set LLM adapter to return a recipe_complete envelope for the e2e test
+    Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+      {:ok,
+       %{
+         "choices" => [
+           %{
+             "message" => %{
+               "content" =>
+                 Jason.encode!(%{
+                   "completeness" => "recipe_complete",
+                   "missing_fields" => [],
+                   "recipe" => %{
+                     "name" => "Homemade Granola",
+                     "description" => "A simple oven-toasted granola.",
+                     "recipeYield" => "8 servings",
+                     "recipeIngredient" => [
+                       "3 cups rolled oats",
+                       "1 cup raw almonds",
+                       "1/2 cup maple syrup",
+                       "1/3 cup coconut oil",
+                       "1 tsp salt"
+                     ],
+                     "recipeInstructions" => [
+                       %{"text" => "Combine oats, almonds, syrup, oil, and salt."},
+                       %{"text" => "Bake at 160C for 40 minutes, stirring halfway."}
+                     ],
+                     "tags" => ["breakfast"]
+                   }
+                 })
+             }
+           }
+         ]
+       }}
+    end)
 
     on_exit(fn ->
       Process.exit(pid, :kill)
-      Application.put_env(:insta_mealie, :clients, original_clients)
-      Application.put_env(:insta_mealie, :mealie, original_mealie)
+      Application.put_env(:insta_mealie, :mealie, [])
+      Application.put_env(:insta_mealie, InstaMealie.YtDlp, InstaMealie.YtDlp.Cli)
+
+      try do
+        Application.delete_env(:insta_mealie, :llm_http_adapter)
+      rescue
+        _ -> :ok
+      end
     end)
 
     {:ok, port: port, base: base}
@@ -123,7 +191,7 @@ defmodule InstaMealie.Mealie.RealTest do
         "secret" => "ignored"
       }
 
-      payload = Real.build_payload(recipe)
+      payload = Mealie.build_payload(recipe)
       assert payload["name"] == "Granola"
       assert payload["recipeIngredient"] == ["3 cups oats"]
       assert payload["tags"] == ["breakfast"]
@@ -134,40 +202,40 @@ defmodule InstaMealie.Mealie.RealTest do
 
   describe "classify_response/1" do
     test "2xx is ok with body" do
-      assert Real.classify_response(%{status: 200, body: %{"slug" => "x"}}) ==
+      assert Mealie.classify_response(%{status: 200, body: %{"slug" => "x"}}) ==
                {:ok, %{"slug" => "x"}}
 
-      assert Real.classify_response(%{status: 201, body: %{}}) == {:ok, %{}}
+      assert Mealie.classify_response(%{status: 201, body: %{}}) == {:ok, %{}}
     end
 
     test "validation is a dead row" do
-      assert Real.classify_response(%{status: 422, body: %{}}) ==
+      assert Mealie.classify_response(%{status: 422, body: %{}}) ==
                {:error, :validation, "validation failed"}
     end
 
     test "auth errors" do
-      assert Real.classify_response(%{status: 401, body: %{}}) == {:error, :auth, "unauthorized"}
-      assert Real.classify_response(%{status: 403, body: %{}}) == {:error, :auth, "forbidden"}
+      assert Mealie.classify_response(%{status: 401, body: %{}}) == {:error, :auth, "unauthorized"}
+      assert Mealie.classify_response(%{status: 403, body: %{}}) == {:error, :auth, "forbidden"}
     end
 
     test "server errors are network (retryable)" do
-      assert Real.classify_response(%{status: 500, body: %{}}) ==
+      assert Mealie.classify_response(%{status: 500, body: %{}}) ==
                {:error, :network, "server error 500"}
     end
 
     test "other 4xx is api_error" do
-      assert Real.classify_response(%{status: 404, body: %{}}) ==
+      assert Mealie.classify_response(%{status: 404, body: %{}}) ==
                {:error, :api_error, "client error 404"}
     end
   end
 
   describe "search dispatch" do
     test "search_foods returns data list" do
-      assert {:ok, [%{"name" => "oats"}]} = Real.search_foods("oats")
+      assert {:ok, [%{"name" => "oats"}]} = Mealie.search_foods("oats")
     end
 
     test "search_units returns data list" do
-      assert {:ok, [%{"name" => "cup"}]} = Real.search_units("cup")
+      assert {:ok, [%{"name" => "cup"}]} = Mealie.search_units("cup")
     end
   end
 

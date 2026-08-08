@@ -1,13 +1,18 @@
 import Config
 
-# Always use stub clients in tests, regardless of host binaries, and skip
-# the boot preflight so the suite stays network/CLI-free.
-config :insta_mealie, :clients,
-  mealie: InstaMealie.MealieStub,
-  llm: InstaMealie.LlmStub,
-  ytdlp: InstaMealie.YtDlpStub
-
 config :insta_mealie, :skip_preflight, true
+
+# LLM and Whisper test config (stubs set via Application env adapters in tests)
+config :insta_mealie, :openai,
+  base_url: "http://localhost:9999",
+  api_key: "test-key",
+  model: "test-model",
+  merge_model: "test-merge-model"
+
+config :insta_mealie, :whisper,
+  base_url: "http://localhost:9999",
+  api_key: "test-key",
+  model: "whisper-1"
 
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
@@ -16,8 +21,6 @@ config :insta_mealie, InstaMealieWeb.Endpoint,
   secret_key_base: "UIk2H5D4lCatS1SFUHoW80Rvrfnf93RRT43qsE4pJKQOBwjDhxhSJHux8AqM0wxn",
   server: false
 
-# In test we don't send emails
-config :insta_mealie, InstaMealie.Mailer, adapter: Swoosh.Adapters.Test
 
 # Disable swoosh api client as it is only required for production adapters
 config :swoosh, :api_client, false

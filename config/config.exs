@@ -26,14 +26,6 @@ config :phoenix_live_view,
   # the attribute set on all root tags. Used for Phoenix.LiveView.ColocatedCSS.
   root_tag_attribute: "phx-r"
 
-# Configure the mailer
-#
-# By default it uses the "Local" adapter which stores the emails
-# locally. You can see the emails in your browser, at "/dev/mailbox".
-#
-# For production it's recommended to configure a different adapter
-# at the `config/runtime.exs`.
-config :insta_mealie, InstaMealie.Mailer, adapter: Swoosh.Adapters.Local
 
 # Configure esbuild (the version is required)
 config :esbuild,
@@ -65,12 +57,8 @@ config :logger, :default_formatter,
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 
-# For T1 the three external clients are stubbed so the app runs with zero network.
-# Later tickets swap these for Req-backed real adapters.
-config :insta_mealie, :clients,
-  mealie: InstaMealie.MealieStub,
-  llm: InstaMealie.LlmStub,
-  ytdlp: InstaMealie.YtDlpStub
+# Per-module behaviour defaults (overridable per environment / test).
+config :insta_mealie, InstaMealie.YtDlp, InstaMealie.YtDlp.Cli
 
 # Pipeline housekeeping defaults (overridable per environment / test).
 config :insta_mealie, InstaMealie.Pipeline,

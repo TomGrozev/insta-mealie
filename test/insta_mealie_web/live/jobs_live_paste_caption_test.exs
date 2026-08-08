@@ -1,33 +1,21 @@
 defmodule InstaMealieWeb.JobsLivePasteCaptionTest do
-  use ExUnit.Case, async: false
+  use InstaMealie.TestCase
 
   import Phoenix.LiveViewTest
   import Phoenix.ConnTest
 
   alias InstaMealie.Pipeline
   alias InstaMealie.Pipeline.Job
-  alias InstaMealie.Pipeline.JobStore
 
   @endpoint InstaMealieWeb.Endpoint
 
   @preflight_key :insta_mealie_ytdlp_preflight
 
-  setup do
-    JobStore.clear()
-
-    Application.put_env(:insta_mealie, :clients,
-      mealie: InstaMealie.MealieStub,
-      llm: InstaMealie.LlmStub,
-      ytdlp: InstaMealie.YtDlpStub
-    )
-
-    :ok
-  end
-
-  defp start_failed_job(clients, url \\ "https://instagram.com/reel/fail") do
+  defp start_failed_job(setup_fn, url \\ "https://instagram.com/reel/fail") do
     Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
-    Application.put_env(:insta_mealie, :clients, clients)
+    setup_fn.()
     assert {:ok, id} = Pipeline.create_job(%{url: url})
+    allow_job_services(id)
     assert_receive {:job_updated, %Job{id: ^id, state: :failed}}, 5000
     {id, Pipeline.get_job(id)}
   end
@@ -35,11 +23,11 @@ defmodule InstaMealieWeb.JobsLivePasteCaptionTest do
   describe "paste-caption overflow (fetch failure)" do
     test "paste-caption textarea submits and the job succeeds via caption-only routing" do
       {id, _} =
-        start_failed_job(
-          mealie: InstaMealie.MealieStub,
-          llm: InstaMealie.LlmStub,
-          ytdlp: InstaMealie.Test.YtDlpFetchNetworkDouble
-        )
+        start_failed_job(fn ->
+          Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+            {:error, :network, "could not reach instagram"}
+          end)
+        end)
 
       {:ok, view, _html} = live(build_conn(), "/")
       _html = render(view)
@@ -57,17 +45,25 @@ defmodule InstaMealieWeb.JobsLivePasteCaptionTest do
         "caption" => "1 cup flour. Bake 20 min."
       })
 
+      # Allow the new GenServer
+      receive do
+        {:job_updated, %Job{id: new_id}} ->
+          allow_job_services(new_id)
+      after
+        0 -> :ok
+      end
+
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded}}, 5000
       assert render(view) =~ "Open in Mealie"
     end
 
     test "ip_banned fetch failure offers paste-only (no Retry) and still imports on paste" do
       {id, _} =
-        start_failed_job(
-          mealie: InstaMealie.MealieStub,
-          llm: InstaMealie.LlmStub,
-          ytdlp: InstaMealie.Test.YtDlpFetchIpBannedDouble
-        )
+        start_failed_job(fn ->
+          Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+            {:error, :ip_banned, "ip address banned by instagram"}
+          end)
+        end)
 
       {:ok, view, _html} = live(build_conn(), "/")
       _html = render(view)
@@ -85,6 +81,14 @@ defmodule InstaMealieWeb.JobsLivePasteCaptionTest do
         "job-id" => id,
         "caption" => "1 cup flour. Bake 20 min."
       })
+
+      # Allow the new GenServer
+      receive do
+        {:job_updated, %Job{id: new_id}} ->
+          allow_job_services(new_id)
+      after
+        0 -> :ok
+      end
 
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded}}, 5000
       assert render(view) =~ "Open in Mealie"
@@ -119,6 +123,14 @@ defmodule InstaMealieWeb.JobsLivePasteCaptionTest do
       view
       |> form("#caption-create-form", %{"caption" => "1 cup flour. Bake 20 min."})
       |> render_submit()
+
+      # Allow the GenServer
+      receive do
+        {:job_updated, %Job{id: id}} ->
+          allow_job_services(id)
+      after
+        0 -> :ok
+      end
 
       assert_receive {:job_updated, %Job{state: :succeeded}}, 5000
       assert render(view) =~ "Open in Mealie"

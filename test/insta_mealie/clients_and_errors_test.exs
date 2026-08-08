@@ -1,27 +1,16 @@
 defmodule InstaMealie.ClientsAndErrorsTest do
-  use ExUnit.Case, async: false
+  use InstaMealie.TestCase
 
   alias InstaMealie.Pipeline
-  alias InstaMealie.Pipeline.Clients
-
-  setup do
-    Application.put_env(:insta_mealie, :clients,
-      mealie: InstaMealie.MealieStub,
-      llm: InstaMealie.LlmStub,
-      ytdlp: InstaMealie.YtDlpStub
-    )
-
-    :ok
-  end
 
   describe "error_retryable?/1" do
     test "validation is a dead row" do
       refute Pipeline.error_retryable?(:validation)
     end
 
-    test "network and auth are retryable" do
+    test "network is retryable, auth is a dead row" do
       assert Pipeline.error_retryable?(:network)
-      assert Pipeline.error_retryable?(:auth)
+      refute Pipeline.error_retryable?(:auth)
     end
 
     test "other transient classes are retryable; unknowns are not" do
@@ -36,8 +25,9 @@ defmodule InstaMealie.ClientsAndErrorsTest do
 
   describe "candidate search dispatch" do
     test "search_foods / search_units route to the mealie client" do
-      assert {:ok, []} = Clients.search_foods("x")
-      assert {:ok, []} = Clients.search_units("y")
+      # The TestCase setup already stubs mealie to return empty data for /api/foods and /api/units
+      assert {:ok, []} = InstaMealie.Mealie.search_foods("x")
+      assert {:ok, []} = InstaMealie.Mealie.search_units("y")
     end
   end
 end

@@ -1,4 +1,4 @@
-defmodule InstaMealie.YtDlp.Real do
+defmodule InstaMealie.YtDlp.Cli do
   @moduledoc """
   Real yt-dlp wrapper invoked via `System.cmd` (ADR 0002).
 
@@ -7,10 +7,6 @@ defmodule InstaMealie.YtDlp.Real do
   caption/author/comments. Fetch failures are classified into the standard
   verdict vocabulary (extraction | rate_limited | cookie_expired | network |
   ip_banned).
-
-  `transcribe/2` shells out to a local Whisper CLI. Whisper integration is
-  wired here but is only exercised on the `recipe_partial` / `no_recipe`
-  paths (later tickets); on the `recipe_complete` path it is never called.
 
   Boot preflight (`preflight!/0`) verifies yt-dlp presence, version, and
   impersonation support, caching the result in `:persistent_term`.
@@ -42,32 +38,6 @@ defmodule InstaMealie.YtDlp.Real do
     end
   rescue
     e in RuntimeError -> {:error, :extraction, Exception.message(e)}
-  end
-
-  @impl true
-  def transcribe(video_path, _opts) when is_binary(video_path) do
-    case System.find_executable("whisper") do
-      nil ->
-        {:error, :extraction, "whisper CLI not found; transcription unavailable"}
-
-      whisper ->
-        out_dir = temp_dir!()
-
-        case System.cmd(
-               whisper,
-               [video_path, "--model", "base", "--output_format", "txt", "--output_dir", out_dir],
-               stderr_to_stdout: true
-             ) do
-          {_out, 0} ->
-            case Path.wildcard(Path.join(out_dir, "*.txt")) |> List.first() do
-              nil -> {:error, :extraction, "whisper produced no transcript"}
-              txt -> {:ok, txt |> File.read!() |> String.trim()}
-            end
-
-          {_stderr, _code} ->
-            {:error, :extraction, "whisper failed"}
-        end
-    end
   end
 
   # ---- preflight ----

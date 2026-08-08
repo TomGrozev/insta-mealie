@@ -1,6 +1,6 @@
 defmodule InstaMealie.YtDlp do
   @moduledoc """
-  Behaviour for fetching reels via yt-dlp and transcribing audio with Whisper.
+  Behaviour for fetching reels via yt-dlp.
 
   Classified fetch failures: extraction | rate_limited | cookie_expired |
   network | ip_banned.
@@ -13,6 +13,8 @@ defmodule InstaMealie.YtDlp do
   """
   @callback fetch(url :: String.t(), opts :: keyword()) ::
               {:ok, map()} | {:error, atom(), term()}
-  @callback transcribe(video_path :: String.t(), opts :: keyword()) ::
-              {:ok, String.t()} | {:error, atom(), term()}
+
+  @spec fetch(String.t(), keyword()) :: {:ok, map()} | {:error, atom(), term()}
+  def fetch(url, opts \\ []), do: impl().fetch(url, opts)
+  defp impl, do: Application.get_env(:insta_mealie, __MODULE__, InstaMealie.YtDlp.Cli)
 end

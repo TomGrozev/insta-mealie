@@ -1,5 +1,5 @@
 defmodule InstaMealieWeb.ReviewLiveTest do
-  use ExUnit.Case, async: false
+  use InstaMealie.TestCase
 
   import Phoenix.LiveViewTest
   import Phoenix.ConnTest
@@ -10,22 +10,11 @@ defmodule InstaMealieWeb.ReviewLiveTest do
 
   @endpoint InstaMealieWeb.Endpoint
 
-  setup do
-    JobStore.clear()
-
-    Application.put_env(:insta_mealie, :clients,
-      mealie: InstaMealie.MealieStub,
-      llm: InstaMealie.LlmStub,
-      ytdlp: InstaMealie.YtDlpStub
-    )
-
-    :ok
-  end
-
-  defp start_review_job(clients, url \\ "https://instagram.com/reel/review") do
+  defp start_review_job(setup_fn, url \\ "https://instagram.com/reel/review") do
     Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
-    Application.put_env(:insta_mealie, :clients, clients)
+    setup_fn.()
     assert {:ok, id} = Pipeline.create_job(%{url: url})
+
     assert_receive {:job_updated, %Job{id: ^id, state: :needs_review}}, 5000
     {id, Pipeline.get_job(id)}
   end
@@ -40,14 +29,182 @@ defmodule InstaMealieWeb.ReviewLiveTest do
     view
   end
 
+  defp review_mealie_setup do
+    Application.put_env(:insta_mealie, :mealie_http_adapter, fn %{method: m, path: p} ->
+      parsed_ingredients = [
+        %{
+          "quantity" => 3,
+          "unit" => %{"name" => "cups", "id" => "unit-cups"},
+          "food" => %{
+            "name" => "mystery-spice",
+            "id" => nil,
+            "confidence" => 0.3
+          },
+          "note" => nil
+        },
+        %{
+          "quantity" => nil,
+          "unit" => %{"name" => nil, "id" => "unit-1"},
+          "food" => %{"name" => "paprika", "id" => "food-1", "confidence" => 1.0},
+          "note" => nil
+        },
+        %{
+          "quantity" => nil,
+          "unit" => %{"name" => nil, "id" => "unit-1"},
+          "food" => %{"name" => "cumin", "id" => "food-2", "confidence" => 1.0},
+          "note" => nil
+        }
+      ]
+
+      cond do
+        m == :post and p == "/api/recipes" ->
+          {:ok, %{"slug" => "review-slug", "id" => "review-slug"}}
+
+        m == :put and String.starts_with?(p, "/api/recipes/") ->
+          {:ok, %{"slug" => "review-slug"}}
+
+        m == :get and String.starts_with?(p, "/api/foods") ->
+          {:ok, %{"data" => ["mystery-spice", "paprika", "cumin"]}}
+
+        m == :get and String.starts_with?(p, "/api/units") ->
+          {:ok, %{"data" => ["cups", "tbsp"]}}
+
+        m == :post and p == "/api/parser/ingredients" ->
+          {:ok, parsed_ingredients}
+
+        true ->
+          {:ok, %{}}
+      end
+    end)
+  end
+
+  defp review_zero_candidate_mealie_setup do
+    Application.put_env(:insta_mealie, :mealie_http_adapter, fn %{method: m, path: p} ->
+      parsed_ingredients = [
+        %{
+          "quantity" => 3,
+          "unit" => %{"name" => "cups", "id" => "unit-cups"},
+          "food" => %{
+            "name" => "mystery-spice",
+            "id" => nil,
+            "confidence" => 0.3
+          },
+          "note" => nil
+        },
+        %{
+          "quantity" => nil,
+          "unit" => %{"name" => nil, "id" => "unit-1"},
+          "food" => %{"name" => "known-ingredient", "id" => "food-1", "confidence" => 1.0},
+          "note" => nil
+        }
+      ]
+
+      cond do
+        m == :post and p == "/api/recipes" ->
+          {:ok, %{"slug" => "review-zero-slug", "id" => "review-zero-slug"}}
+
+        m == :put and String.starts_with?(p, "/api/recipes/") ->
+          {:ok, %{"slug" => "review-zero-slug"}}
+
+        m == :get and String.starts_with?(p, "/api/foods") ->
+          {:ok, %{"data" => ["paprika", "cumin"]}}
+
+        m == :get and String.starts_with?(p, "/api/units") ->
+          {:ok, %{"data" => ["cups", "tbsp"]}}
+
+        m == :post and p == "/api/parser/ingredients" ->
+          {:ok, parsed_ingredients}
+
+        true ->
+          {:ok, %{}}
+      end
+    end)
+  end
+
+  defp review_validation_mealie_setup do
+    Application.put_env(:insta_mealie, :mealie_http_adapter, fn %{method: m, path: p} ->
+      parsed_ingredients = [
+        %{
+          "quantity" => 3,
+          "unit" => %{"name" => "cups", "id" => "unit-cups"},
+          "food" => %{
+            "name" => "mystery-spice",
+            "id" => nil,
+            "confidence" => 0.3
+          },
+          "note" => nil
+        },
+        %{
+          "quantity" => nil,
+          "unit" => %{"name" => nil, "id" => "unit-1"},
+          "food" => %{"name" => "known-ingredient", "id" => "food-1", "confidence" => 1.0},
+          "note" => nil
+        }
+      ]
+
+      cond do
+        m == :post and p == "/api/recipes" ->
+          {:error, :validation, "rejected"}
+
+        m == :get and String.starts_with?(p, "/api/foods") ->
+          {:ok, %{"data" => ["mystery-spice", "paprika", "cumin"]}}
+
+        m == :get and String.starts_with?(p, "/api/units") ->
+          {:ok, %{"data" => ["cups", "tbsp"]}}
+
+        m == :post and p == "/api/parser/ingredients" ->
+          {:ok, parsed_ingredients}
+
+        true ->
+          {:ok, %{}}
+      end
+    end)
+  end
+
+  defp review_network_mealie_setup do
+    Application.put_env(:insta_mealie, :mealie_http_adapter, fn %{method: m, path: p} ->
+      parsed_ingredients = [
+        %{
+          "quantity" => 3,
+          "unit" => %{"name" => "cups", "id" => "unit-cups"},
+          "food" => %{
+            "name" => "mystery-spice",
+            "id" => nil,
+            "confidence" => 0.3
+          },
+          "note" => nil
+        },
+        %{
+          "quantity" => nil,
+          "unit" => %{"name" => nil, "id" => "unit-1"},
+          "food" => %{"name" => "known-ingredient", "id" => "food-1", "confidence" => 1.0},
+          "note" => nil
+        }
+      ]
+
+      cond do
+        m == :post and p == "/api/recipes" ->
+          {:error, :network, "down"}
+
+        m == :get and String.starts_with?(p, "/api/foods") ->
+          {:ok, %{"data" => ["mystery-spice", "paprika", "cumin"]}}
+
+        m == :get and String.starts_with?(p, "/api/units") ->
+          {:ok, %{"data" => ["cups", "tbsp"]}}
+
+        m == :post and p == "/api/parser/ingredients" ->
+          {:ok, parsed_ingredients}
+
+        true ->
+          {:ok, %{}}
+      end
+    end)
+  end
+
   describe "Review trigger + UI" do
     test "review is triggered when parse_ingredients has an unknown ingredient" do
       {id, _} =
-        start_review_job(
-          mealie: InstaMealie.Test.MealieReviewDouble,
-          llm: InstaMealie.LlmStub,
-          ytdlp: InstaMealie.YtDlpStub
-        )
+        start_review_job(fn -> review_mealie_setup() end)
 
       view = mount_review_view(id)
       html = render(view)
@@ -60,11 +217,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
 
     test "Suggested candidates appear in the food select" do
       {id, _} =
-        start_review_job(
-          mealie: InstaMealie.Test.MealieReviewDouble,
-          llm: InstaMealie.LlmStub,
-          ytdlp: InstaMealie.YtDlpStub
-        )
+        start_review_job(fn -> review_mealie_setup() end)
 
       view = mount_review_view(id)
       html = render(view)
@@ -76,11 +229,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
 
     test "JobsLive shows a Review ingredients link for needs_review jobs" do
       {id, _} =
-        start_review_job(
-          mealie: InstaMealie.Test.MealieReviewDouble,
-          llm: InstaMealie.LlmStub,
-          ytdlp: InstaMealie.YtDlpStub
-        )
+        start_review_job(fn -> review_mealie_setup() end)
 
       view = mount_jobs_view()
       assert has_element?(view, "#review-#{id}")
@@ -92,11 +241,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
   describe "Zero-candidate auto-reveal" do
     test "custom input is visible and pre-filled when search_foods returns empty" do
       {id, _} =
-        start_review_job(
-          mealie: InstaMealie.Test.MealieReviewZeroCandidateDouble,
-          llm: InstaMealie.LlmStub,
-          ytdlp: InstaMealie.YtDlpStub
-        )
+        start_review_job(fn -> review_zero_candidate_mealie_setup() end)
 
       view = mount_review_view(id)
       html = render(view)
@@ -111,11 +256,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
   describe "Import success" do
     test "apply_ingredient_resolutions imports the recipe and shows success" do
       {id, _} =
-        start_review_job(
-          mealie: InstaMealie.Test.MealieReviewDouble,
-          llm: InstaMealie.LlmStub,
-          ytdlp: InstaMealie.YtDlpStub
-        )
+        start_review_job(fn -> review_mealie_setup() end)
 
       # Mount the view first while still in needs_review
       view = mount_review_view(id)
@@ -137,11 +278,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
   describe "Validation dead row" do
     test "failed import with validation shows dead row, no retry" do
       {id, _} =
-        start_review_job(
-          mealie: InstaMealie.Test.MealieReviewValidationDouble,
-          llm: InstaMealie.LlmStub,
-          ytdlp: InstaMealie.YtDlpStub
-        )
+        start_review_job(fn -> review_validation_mealie_setup() end)
 
       view = mount_review_view(id)
 
@@ -160,13 +297,9 @@ defmodule InstaMealieWeb.ReviewLiveTest do
   end
 
   describe "Retry re-fires, skips re-review" do
-    test "network error then retry with MealieStub succeeds without re-review" do
+    test "network error then retry succeeds without re-review" do
       {id, _} =
-        start_review_job(
-          mealie: InstaMealie.Test.MealieReviewNetworkDouble,
-          llm: InstaMealie.LlmStub,
-          ytdlp: InstaMealie.YtDlpStub
-        )
+        start_review_job(fn -> review_network_mealie_setup() end)
 
       view = mount_review_view(id)
 
@@ -180,12 +313,58 @@ defmodule InstaMealieWeb.ReviewLiveTest do
       html = render(view)
       assert html =~ "Import error"
 
-      # Swap client to MealieStub for the retry
-      Application.put_env(:insta_mealie, :clients,
-        mealie: InstaMealie.MealieStub,
-        llm: InstaMealie.LlmStub,
-        ytdlp: InstaMealie.YtDlpStub
-      )
+      # Swap mealie stub to default success for the retry
+      Application.put_env(:insta_mealie, :mealie_http_adapter, fn %{method: m, path: p} ->
+        parsed_ingredients = [
+          %{
+            "quantity" => 3,
+            "unit" => %{"name" => "cups", "id" => "unit-cups"},
+            "food" => %{
+              "name" => "mystery-spice",
+              "id" => nil,
+              "confidence" => 0.3
+            },
+            "note" => nil
+          },
+          %{
+            "quantity" => nil,
+            "unit" => %{"name" => nil, "id" => "unit-1"},
+            "food" => %{"name" => "paprika", "id" => "food-1", "confidence" => 1.0},
+            "note" => nil
+          },
+          %{
+            "quantity" => nil,
+            "unit" => %{"name" => nil, "id" => "unit-1"},
+            "food" => %{"name" => "cumin", "id" => "food-2", "confidence" => 1.0},
+            "note" => nil
+          }
+        ]
+
+        cond do
+          m == :post and p == "/api/recipes" ->
+            slug =
+              "homemade-granola-" <>
+                (:crypto.strong_rand_bytes(3) |> Base.encode16(case: :lower))
+
+            {:ok, %{"slug" => slug, "id" => slug}}
+
+          m == :put and String.starts_with?(p, "/api/recipes/") ->
+            slug = Path.basename(p)
+            {:ok, %{"slug" => slug}}
+
+          m == :get and String.starts_with?(p, "/api/foods") ->
+            {:ok, %{"data" => ["paprika", "cumin"]}}
+
+          m == :get and String.starts_with?(p, "/api/units") ->
+            {:ok, %{"data" => ["cups", "tbsp"]}}
+
+          m == :post and p == "/api/parser/ingredients" ->
+            {:ok, parsed_ingredients}
+
+          true ->
+            {:ok, %{}}
+        end
+      end)
 
       Pipeline.retry(id)
       job = Pipeline.get_job(id)
@@ -198,12 +377,6 @@ defmodule InstaMealieWeb.ReviewLiveTest do
   describe "Empty triggered set skips review" do
     test "all-known ingredients go straight to succeeded" do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
-
-      Application.put_env(:insta_mealie, :clients,
-        mealie: InstaMealie.MealieStub,
-        llm: InstaMealie.LlmStub,
-        ytdlp: InstaMealie.YtDlpStub
-      )
 
       assert {:ok, id} = Pipeline.create_job(%{url: "https://instagram.com/reel/noreview"})
 
@@ -243,11 +416,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
   describe "Real form submit regression — Issue 1 (param nesting)" do
     test "nested review params via render_submit import the recipe and show success" do
       {id, _} =
-        start_review_job(
-          mealie: InstaMealie.Test.MealieReviewDouble,
-          llm: InstaMealie.LlmStub,
-          ytdlp: InstaMealie.YtDlpStub
-        )
+        start_review_job(fn -> review_mealie_setup() end)
 
       view = mount_review_view(id)
       html = render(view)
@@ -275,11 +444,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
   describe "Zero-candidate custom submit regression — Issue 3" do
     test "submitting a zero-candidate field with __custom__ uses the parser's guess" do
       {id, _} =
-        start_review_job(
-          mealie: InstaMealie.Test.MealieReviewZeroCandidateDouble,
-          llm: InstaMealie.LlmStub,
-          ytdlp: InstaMealie.YtDlpStub
-        )
+        start_review_job(fn -> review_zero_candidate_mealie_setup() end)
 
       view = mount_review_view(id)
       html = render(view)

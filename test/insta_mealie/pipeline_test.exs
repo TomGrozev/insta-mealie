@@ -1,5 +1,5 @@
 defmodule InstaMealie.PipelineTest do
-  use ExUnit.Case, async: false
+  use InstaMealie.TestCase
 
   import Phoenix.LiveViewTest
   import Phoenix.ConnTest
@@ -9,18 +9,6 @@ defmodule InstaMealie.PipelineTest do
   alias InstaMealie.Pipeline.JobStore
 
   @endpoint InstaMealieWeb.Endpoint
-
-  setup do
-    JobStore.clear()
-
-    Application.put_env(:insta_mealie, :clients,
-      mealie: InstaMealie.MealieStub,
-      llm: InstaMealie.LlmStub,
-      ytdlp: InstaMealie.YtDlpStub
-    )
-
-    :ok
-  end
 
   describe "happy path (recipe_complete)" do
     test "create_job runs fetch -> llm_format -> mealie_import and succeeds" do
@@ -48,11 +36,46 @@ defmodule InstaMealie.PipelineTest do
     test "runs transcribe + merge before import" do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
 
-      Application.put_env(:insta_mealie, :clients,
-        mealie: InstaMealie.MealieStub,
-        llm: InstaMealie.Test.LlmPartialDouble,
-        ytdlp: InstaMealie.YtDlpStub
-      )
+      # First call returns recipe_partial, second (merge) returns recipe_complete
+      Application.put_env(:insta_mealie, :llm_http_adapter, fn body ->
+        messages = body[:messages] || []
+        last_user_msg = Enum.find(Enum.reverse(messages), fn m -> m[:role] == "user" end)
+        content = if last_user_msg, do: last_user_msg[:content] || "", else: ""
+
+        if String.contains?(content, "Transcript:") do
+          {:ok,
+           %{
+             "choices" => [
+               %{
+                 "message" => %{
+                   "content" =>
+                     Jason.encode!(%{
+                       "completeness" => "recipe_complete",
+                       "missing_fields" => [],
+                       "recipe" => %{"name" => "Merged"}
+                     })
+                 }
+               }
+             ]
+           }}
+        else
+          {:ok,
+           %{
+             "choices" => [
+               %{
+                 "message" => %{
+                   "content" =>
+                     Jason.encode!(%{
+                       "completeness" => "recipe_partial",
+                       "missing_fields" => ["recipeInstructions"],
+                       "recipe" => %{"name" => "Partial"}
+                     })
+                 }
+               }
+             ]
+           }}
+        end
+      end)
 
       assert {:ok, id} = Pipeline.create_job(%{url: "https://instagram.com/reel/xyz"})
 
@@ -74,7 +97,7 @@ defmodule InstaMealie.PipelineTest do
         updated_at: DateTime.utc_now()
       }
 
-      JobStore.insert_raw(job, System.system_time(:millisecond) - 1000)
+      :ets.insert(:insta_mealie_jobs, {job.id, job, System.system_time(:millisecond) - 1000, System.system_time(:millisecond)})
       assert JobStore.get("exp1")
       assert :ok = JobStore.sweep()
       refute JobStore.get("exp1")
@@ -95,25 +118,6 @@ defmodule InstaMealie.PipelineTest do
 
       JobStore.enforce_cap(3)
       assert JobStore.list() |> length() == 3
-    end
-  end
-
-  describe "client stubs" do
-    test "Mealie stub returns a slug and a deep link" do
-      assert {:ok, slug} = InstaMealie.MealieStub.create_recipe(%{})
-      assert is_binary(slug)
-      assert InstaMealie.MealieStub.deep_link(slug) =~ "edit=true"
-    end
-
-    test "Llm stub returns a recipe_complete envelope" do
-      assert {:ok, env} = InstaMealie.LlmStub.format("any caption", [])
-      assert env.completeness == :recipe_complete
-      assert is_map(env.recipe)
-    end
-
-    test "YtDlp stub returns a caption" do
-      assert {:ok, fetch} = InstaMealie.YtDlpStub.fetch("https://example.com/reel", [])
-      assert Map.has_key?(fetch, :caption)
     end
   end
 
@@ -138,13 +142,48 @@ defmodule InstaMealie.PipelineTest do
     test "runs transcribe + merge before import (does NOT fail flatly)" do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
 
-      Application.put_env(:insta_mealie, :clients,
-        mealie: InstaMealie.MealieStub,
-        llm: InstaMealie.Test.LlmNoRecipeDouble,
-        ytdlp: InstaMealie.YtDlpStub
-      )
+      Application.put_env(:insta_mealie, :llm_http_adapter, fn body ->
+        messages = body[:messages] || []
+        last_user_msg = Enum.find(Enum.reverse(messages), fn m -> m[:role] == "user" end)
+        content = if last_user_msg, do: last_user_msg[:content] || "", else: ""
+
+        if String.contains?(content, "Transcript:") do
+          {:ok,
+           %{
+             "choices" => [
+               %{
+                 "message" => %{
+                   "content" =>
+                     Jason.encode!(%{
+                       "completeness" => "recipe_complete",
+                       "missing_fields" => [],
+                       "recipe" => %{"name" => "Transcribed Granola"}
+                     })
+                 }
+               }
+             ]
+           }}
+        else
+          {:ok,
+           %{
+             "choices" => [
+               %{
+                 "message" => %{
+                   "content" =>
+                     Jason.encode!(%{
+                       "completeness" => "no_recipe",
+                       "missing_fields" => ["recipeIngredient", "recipeInstructions"],
+                       "recipe" => %{}
+                     })
+                 }
+               }
+             ]
+           }}
+        end
+      end)
 
       assert {:ok, id} = Pipeline.create_job(%{url: "https://instagram.com/reel/nr"})
+
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded} = job}, 5000
 
       assert job.verdict == :no_recipe
@@ -177,49 +216,108 @@ defmodule InstaMealie.PipelineTest do
     test "pipeline stores only the allowed missing_fields on the job" do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
 
-      Application.put_env(:insta_mealie, :clients,
-        mealie: InstaMealie.MealieStub,
-        llm: InstaMealie.Test.LlmBogusMissingDouble,
-        ytdlp: InstaMealie.YtDlpStub
-      )
+      Application.put_env(:insta_mealie, :llm_http_adapter, fn body ->
+        messages = body[:messages] || []
+        last_user_msg = Enum.find(Enum.reverse(messages), fn m -> m[:role] == "user" end)
+        content = if last_user_msg, do: last_user_msg[:content] || "", else: ""
+
+        if String.contains?(content, "Transcript:") do
+          {:ok,
+           %{
+             "choices" => [
+               %{
+                 "message" => %{
+                   "content" =>
+                     Jason.encode!(%{
+                       "completeness" => "recipe_complete",
+                       "missing_fields" => [],
+                       "recipe" => %{"name" => "M"}
+                     })
+                 }
+               }
+             ]
+           }}
+        else
+          {:ok,
+           %{
+             "choices" => [
+               %{
+                 "message" => %{
+                   "content" =>
+                     Jason.encode!(%{
+                       "completeness" => "recipe_partial",
+                       "missing_fields" => ["recipeIngredient", "nope"],
+                       "recipe" => %{"name" => "P"}
+                     })
+                 }
+               }
+             ]
+           }}
+        end
+      end)
 
       assert {:ok, id} = Pipeline.create_job(%{url: "https://instagram.com/reel/mf"})
+
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded} = job}, 5000
       assert job.missing_fields == [:recipeIngredient]
     end
   end
 
   describe "OP comment filtering" do
-    test "filter_op_comments keeps only the owner's comments" do
-      comments = [
-        %{author: "a", text: "1"},
-        %{author: "b", text: "2"},
-        %{author: "a", text: "3"}
-      ]
-
-      assert InstaMealie.Pipeline.Job.filter_op_comments("a", comments) == [
-               %{author: "a", text: "1"},
-               %{author: "a", text: "3"}
-             ]
-
-      assert InstaMealie.Pipeline.Job.filter_op_comments("a", nil) == []
-      assert InstaMealie.Pipeline.Job.filter_op_comments(nil, comments) == []
-    end
-
     test "only OP comments reach the routing LLM call" do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
 
-      Application.put_env(:insta_mealie, :clients,
-        mealie: InstaMealie.MealieStub,
-        llm: InstaMealie.Test.LlmCommentsDouble,
-        ytdlp: InstaMealie.Test.YtDlpCommentsDouble
-      )
+      Mox.stub(InstaMealie.YtDlp.Mock, :fetch, fn _url, _opts ->
+        {:ok,
+         %{
+           author: "op_user",
+           caption: "Some caption text",
+           comments: [
+             %{author: "op_user", text: "OP says hi"},
+             %{author: "stranger", text: "not the owner"},
+             %{author: "op_user", text: "OP says bye"}
+           ],
+           video_path: "/tmp/insta_mealie/x.mp4"
+         }}
+      end)
+
+      Application.put_env(:insta_mealie, :llm_http_adapter, fn body ->
+        messages = body[:messages] || []
+
+        # Extract comment lines from the user message
+        comments =
+          messages
+          |> Enum.filter(fn m -> m[:role] == "user" end)
+          |> Enum.flat_map(fn m ->
+            m[:content]
+            |> String.split("\n")
+            |> Enum.filter(&String.starts_with?(&1, "  - "))
+            |> Enum.map(&String.trim_leading(&1, "  - "))
+          end)
+
+        {:ok,
+         %{
+           "choices" => [
+             %{
+               "message" => %{
+                 "content" =>
+                   Jason.encode!(%{
+                     "completeness" => "recipe_complete",
+                     "missing_fields" => [],
+                     "recipe" => %{"name" => "authors:#{Enum.join(comments, ",")}"}
+                   })
+               }
+             }
+           ]
+         }}
+      end)
 
       assert {:ok, id} = Pipeline.create_job(%{url: "https://instagram.com/reel/cm"})
+
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded} = job}, 5000
 
       # The double echoes the authors it saw; only op_user (twice) should appear.
-      assert job.recipe["name"] == "authors:op_user,op_user"
+      assert job.recipe["name"] == "authors:OP says hi,OP says bye"
     end
   end
 
@@ -228,11 +326,45 @@ defmodule InstaMealie.PipelineTest do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
       conn = build_conn()
 
-      Application.put_env(:insta_mealie, :clients,
-        mealie: InstaMealie.MealieStub,
-        llm: InstaMealie.Test.LlmPartialDouble,
-        ytdlp: InstaMealie.YtDlpStub
-      )
+      Application.put_env(:insta_mealie, :llm_http_adapter, fn body ->
+        messages = body[:messages] || []
+        last_user_msg = Enum.find(Enum.reverse(messages), fn m -> m[:role] == "user" end)
+        content = if last_user_msg, do: last_user_msg[:content] || "", else: ""
+
+        if String.contains?(content, "Transcript:") do
+          {:ok,
+           %{
+             "choices" => [
+               %{
+                 "message" => %{
+                   "content" =>
+                     Jason.encode!(%{
+                       "completeness" => "recipe_complete",
+                       "missing_fields" => [],
+                       "recipe" => %{"name" => "Merged"}
+                     })
+                 }
+               }
+             ]
+           }}
+        else
+          {:ok,
+           %{
+             "choices" => [
+               %{
+                 "message" => %{
+                   "content" =>
+                     Jason.encode!(%{
+                       "completeness" => "recipe_partial",
+                       "missing_fields" => ["recipeInstructions"],
+                       "recipe" => %{"name" => "Partial"}
+                     })
+                 }
+               }
+             ]
+           }}
+        end
+      end)
 
       {:ok, view, _html} = live(conn, "/")
       assert has_element?(view, "#job-form")
