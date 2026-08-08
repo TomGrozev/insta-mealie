@@ -49,6 +49,7 @@ defmodule InstaMealie.Pipeline do
       url: input[:url] || input["url"],
       caption: input[:caption] || input["caption"],
       caption_only: caption_only,
+      transcribe_anyway: false,
       state: :created,
       stage: nil,
       stages: %{},
@@ -140,6 +141,7 @@ defmodule InstaMealie.Pipeline do
               error_stage: nil,
               error_class: nil,
               error_summary: nil,
+              transcribe_anyway: false,
               retry_count: retry_count,
               updated_at: DateTime.utc_now()
           }
@@ -192,6 +194,7 @@ defmodule InstaMealie.Pipeline do
             | caption: caption,
               state: :caption_pasting,
               caption_only: true,
+              transcribe_anyway: false,
               stage: nil,
               stages: %{},
               error_stage: nil,
@@ -211,13 +214,43 @@ defmodule InstaMealie.Pipeline do
   end
 
   @doc """
-  Seam for the transcribe-anyway override (full flow in #26). Returns the job
-  id; the override re-run lands in a later ticket.
+  Transcribe-anyway override (T7). For a job that failed at the `:transcribe` or
+  `:llm_merge` stage, skip the failed audio and import the caption-only (routing)
+  recipe already on the job, reusing the same `job_id`. This is a one-shot,
+  in-place re-run: the row is reset to `:created` (keeping its `recipe`,
+  `caption`, `verdict`, and `retry_count`), the `transcribe_anyway` flag is set so
+  the GenServer takes the skip-audio FSM branch, and a fresh GenServer is started.
+  Returns `{:error, :invalid_state}` when the job is not in a transcribe/merge
+  failure state, and `{:error, :not_found}` when unknown.
   """
   def apply_transcribe_anyway(job_id) when is_binary(job_id) do
     case JobStore.get(job_id) do
-      nil -> {:error, :not_found}
-      _job -> {:ok, job_id}
+      nil ->
+        {:error, :not_found}
+
+      %{error_stage: stage} = job when stage in [:transcribe, :llm_merge] ->
+        stop_job(job_id)
+
+        updated = %{
+          job
+          | state: :created,
+            stage: nil,
+            stages: %{},
+            error_stage: nil,
+            error_class: nil,
+            error_summary: nil,
+            transcribe_anyway: true,
+            caption_only: false,
+            updated_at: DateTime.utc_now()
+        }
+
+        JobStore.put(updated)
+        broadcast(updated)
+        DynamicSupervisor.start_child(JobSupervisor, {Job, updated})
+        {:ok, job_id}
+
+      _other ->
+        {:error, :invalid_state}
     end
   end
 

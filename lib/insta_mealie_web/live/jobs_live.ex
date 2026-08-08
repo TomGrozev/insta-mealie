@@ -428,6 +428,7 @@ defmodule InstaMealieWeb.JobsLive do
 
   defp verdict_text(%{state: :succeeded}), do: "Imported to Mealie"
   defp verdict_text(%{state: :failed}), do: "Failed"
+  defp verdict_text(%{transcribe_anyway: true}), do: "Importing caption-only recipe…"
   defp verdict_text(%{state: :created}), do: "Queued"
   defp verdict_text(%{state: :caption_pasting}), do: "Awaiting caption"
   defp verdict_text(_), do: "Working…"

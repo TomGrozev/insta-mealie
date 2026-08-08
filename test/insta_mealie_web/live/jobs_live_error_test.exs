@@ -223,7 +223,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
              "Expected a paste-caption-form element, got none. html snippet: #{String.slice(html, -500, 500)}"
     end
 
-    test "transcribe-anyway click does not crash" do
+    test "transcribe-anyway: clicking triggers the skip-audio re-run and hides the button" do
       {id, _} =
         start_failed_job(
           mealie: InstaMealie.MealieStub,
@@ -232,8 +232,10 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
         )
 
       view = mount_view()
-      view |> element("#transcribe-anyway-#{id}") |> render_click()
       assert has_element?(view, "#transcribe-anyway-#{id}")
+      view |> element("#transcribe-anyway-#{id}") |> render_click()
+      assert_receive {:job_updated, %Job{id: ^id, state: :succeeded}}, 5000
+      refute has_element?(view, "#transcribe-anyway-#{id}")
     end
   end
 end

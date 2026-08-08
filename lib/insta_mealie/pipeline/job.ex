@@ -19,6 +19,7 @@ defmodule InstaMealie.Pipeline.Job do
     :url,
     :caption,
     :caption_only,
+    :transcribe_anyway,
     :state,
     :stage,
     :stages,
@@ -82,13 +83,18 @@ defmodule InstaMealie.Pipeline.Job do
   # ---- FSM ----
 
   defp run_pipeline(job) do
-    if job.caption_only do
-      run_caption_only(job)
-    else
-      job
-      |> set_stage(:fetch, :running)
-      |> persist()
-      |> run_fetch()
+    cond do
+      job.transcribe_anyway ->
+        run_transcribe_anyway(job)
+
+      job.caption_only ->
+        run_caption_only(job)
+
+      true ->
+        job
+        |> set_stage(:fetch, :running)
+        |> persist()
+        |> run_fetch()
     end
   end
 
@@ -142,6 +148,20 @@ defmodule InstaMealie.Pipeline.Job do
       :incomplete_caption,
       "The pasted caption does not contain a complete recipe, and there is no audio to transcribe."
     )
+  end
+
+  # ---- transcribe-anyway override (T7) ----
+  # Skip the failed audio and import the caption-only (routing) recipe that is
+  # already on the job, reusing the same ETS row.
+
+  defp run_transcribe_anyway(job) do
+    job
+    |> set_stage(:fetch, :skipped)
+    |> set_stage(:transcribe, :skipped)
+    |> set_stage(:llm_format, :done)
+    |> set_stage(:llm_merge, :skipped)
+    |> persist()
+    |> run_import()
   end
 
   defp run_fetch(job) do
