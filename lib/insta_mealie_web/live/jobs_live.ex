@@ -209,6 +209,16 @@ defmodule InstaMealieWeb.JobsLive do
             Open in Mealie <.icon name="hero-arrow-top-right-on-square" class="inline size-4" />
           </a>
         <% end %>
+
+        <%= if @job.state == :needs_review do %>
+          <.link
+            navigate={~p"/jobs/#{@job.id}/review"}
+            id={"review-#{@job.id}"}
+            class="shrink-0 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-content transition hover:opacity-90"
+          >
+            Review ingredients
+          </.link>
+        <% end %>
       </div>
 
       <div class="mt-3 flex flex-wrap gap-2">
@@ -427,6 +437,7 @@ defmodule InstaMealieWeb.JobsLive do
   defp stage_label(:mealie_import), do: "Import"
 
   defp verdict_text(%{state: :succeeded}), do: "Imported to Mealie"
+  defp verdict_text(%{state: :needs_review}), do: "Needs ingredient review"
   defp verdict_text(%{state: :failed}), do: "Failed"
   defp verdict_text(%{transcribe_anyway: true}), do: "Importing caption-only recipe…"
   defp verdict_text(%{state: :created}), do: "Queued"

@@ -23,4 +23,22 @@ defmodule InstaMealie.MealieStub do
 
   @impl true
   def search_units(_term), do: {:ok, []}
+
+  @impl true
+  def parse_ingredients(list) when is_list(list) do
+    parsed =
+      Enum.map(list, fn ingredient ->
+        %{
+          "quantity" => nil,
+          "unit" => nil,
+          "unit_id" => nil,
+          "food" => ingredient,
+          "food_id" => "stub-#{ingredient}",
+          "food_confidence" => 1.0,
+          "note" => nil
+        }
+      end)
+
+    {:ok, parsed}
+  end
 end

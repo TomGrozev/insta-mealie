@@ -62,6 +62,7 @@ defmodule InstaMealie.Pipeline do
       error_class: nil,
       error_summary: nil,
       retry_count: %{},
+      review: nil,
       output_language: output_language(),
       inserted_at: now,
       updated_at: now
@@ -114,6 +115,10 @@ defmodule InstaMealie.Pipeline do
     case JobStore.get(job_id) do
       nil ->
         {:error, :not_found}
+
+      %{error_stage: :mealie_import} = job when not is_nil(job.recipe) ->
+        stop_job(job_id)
+        run_import_inline(job)
 
       job ->
         stop_job(job_id)
@@ -255,13 +260,70 @@ defmodule InstaMealie.Pipeline do
   end
 
   @doc """
-  Seam for the unknown-ingredient review resolution (full flow in #27).
-  Returns the job id; applying resolutions before import lands later.
+  Apply ingredient resolutions from the review screen (T8). Replaces the raw
+  ingredient strings in the recipe with the user's picks, then fires the import.
   """
-  def apply_ingredient_resolutions(job_id, _resolutions) when is_binary(job_id) do
+  def apply_ingredient_resolutions(job_id, resolutions) when is_binary(job_id) do
     case JobStore.get(job_id) do
-      nil -> {:error, :not_found}
-      _job -> {:ok, job_id}
+      nil ->
+        {:error, :not_found}
+
+      job ->
+        ingredients = get_in(job.review, [:ingredients])
+        raw_list = job.recipe["recipeIngredient"] || []
+
+        if ingredients == nil do
+          run_import_inline(job)
+        else
+          new_list =
+            Enum.with_index(raw_list)
+            |> Enum.map(fn {raw, i} ->
+              resolution =
+                Map.get(resolutions, i) || Map.get(resolutions, to_string(i))
+
+              case resolution do
+                nil ->
+                  raw
+
+                %{"food" => food, "unit" => unit} ->
+                  ing = Enum.find(ingredients, fn ing -> ing.index == i end)
+                  ing_quantity = if ing, do: ing.quantity, else: nil
+                  ing_note = if ing, do: ing.note, else: nil
+
+                  obj = %{"quantity" => ing_quantity, "food" => food}
+
+                  obj =
+                    if unit && unit != "",
+                      do: Map.put(obj, "unit", unit),
+                      else: obj
+
+                  obj =
+                    if ing_note,
+                      do: Map.put(obj, "note", ing_note),
+                      else: obj
+
+                  obj
+
+                _ ->
+                  raw
+              end
+            end)
+
+          resolved_recipe = put_in(job.recipe, ["recipeIngredient"], new_list)
+
+          updated_job = %{
+            job
+            | recipe: resolved_recipe,
+              review: nil,
+              state: :created,
+              stage: :mealie_import,
+              stages: Map.put(job.stages, :mealie_import, :running)
+          }
+
+          JobStore.put(updated_job)
+          broadcast(updated_job)
+          run_import_inline(updated_job)
+        end
     end
   end
 

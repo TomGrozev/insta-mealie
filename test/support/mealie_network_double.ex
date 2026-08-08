@@ -17,4 +17,22 @@ defmodule InstaMealie.Test.MealieNetworkDouble do
   def search_foods(_term), do: {:ok, []}
   @impl true
   def search_units(_term), do: {:ok, []}
+
+  @impl true
+  def parse_ingredients(list) when is_list(list) do
+    parsed =
+      Enum.map(list, fn text ->
+        %{
+          "quantity" => nil,
+          "unit" => nil,
+          "unit_id" => nil,
+          "food" => text,
+          "food_id" => "stub-" <> text,
+          "food_confidence" => 1.0,
+          "note" => nil
+        }
+      end)
+
+    {:ok, parsed}
+  end
 end

@@ -49,6 +49,38 @@ defmodule InstaMealie.Mealie.Real do
   @impl true
   def search_units(term) when is_binary(term), do: search_collection("units", term)
 
+  @impl true
+  def parse_ingredients(list) when is_list(list) do
+    payload = Enum.map(list, fn text -> %{text: text} end)
+
+    case request(:post, "/api/parser/ingredients", payload) do
+      {:ok, body} when is_list(body) ->
+        parsed =
+          Enum.map(body, fn item ->
+            unit = Map.get(item, "unit") || %{}
+            food = Map.get(item, "food") || %{}
+
+            %{
+              "quantity" => Map.get(item, "quantity"),
+              "unit" => Map.get(unit, "name"),
+              "unit_id" => Map.get(unit, "id"),
+              "food" => Map.get(food, "name"),
+              "food_id" => Map.get(food, "id"),
+              "food_confidence" => get_in(food, ["confidence"]),
+              "note" => Map.get(item, "note")
+            }
+          end)
+
+        {:ok, parsed}
+
+      {:ok, _other} ->
+        {:error, :api_error, "unexpected parse response"}
+
+      {:error, class, reason} ->
+        {:error, class, reason}
+    end
+  end
+
   defp search_collection(type, term) do
     case request(:get, "/api/#{type}?perPage=25&search=#{URI.encode_www_form(term)}") do
       {:ok, body} -> {:ok, Map.get(body, "data", [])}

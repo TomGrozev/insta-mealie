@@ -33,6 +33,39 @@ defmodule FakeMealie do
     |> put_resp_content_type("application/json")
     |> send_resp(200, Jason.encode!(%{data: [%{"name" => "cup"}]}))
   end
+
+  post "/api/parser/ingredients" do
+    {:ok, body, conn} = Plug.Conn.read_body(conn)
+    ingredients = Jason.decode!(body)
+
+    parsed =
+      Enum.with_index(ingredients)
+      |> Enum.map(fn {item, i} ->
+        if i == 0 do
+          %{
+            "quantity" => 3,
+            "unit" => %{"name" => "cups", "id" => "unit-cups"},
+            "food" => %{"name" => "oats", "id" => "food-oats", "confidence" => 1.0},
+            "note" => nil
+          }
+        else
+          %{
+            "quantity" => 1,
+            "unit" => %{"name" => "cup", "id" => "unit-cup"},
+            "food" => %{
+              "name" => Map.get(item, "text", "unknown"),
+              "id" => "food-#{i}",
+              "confidence" => 1.0
+            },
+            "note" => nil
+          }
+        end
+      end)
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, Jason.encode!(parsed))
+  end
 end
 
 defmodule InstaMealie.Mealie.RealTest do
