@@ -1,4 +1,4 @@
-# ADR-0003: Stage work runs in supervised tasks
+# ADR-0005: Stage work runs in supervised tasks
 
 Date: 2026-08-09
 Status: Accepted
