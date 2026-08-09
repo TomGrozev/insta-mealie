@@ -24,6 +24,9 @@ _Avoid_: manual input, paste mode
 A single pipeline run that turns one reel (or pasted caption) into one Mealie recipe. Its identity is the `job_id`, which is preserved across retries and state transitions.
 _Avoid_: run, task, request
 
+**Job action**
+The set of operations the pipeline offers on a job: `:retry`, `:paste_caption`, `:transcribe_anyway`, or `:cancel`. Decided by `Pipeline.available_actions/1` and rendered by the UI.
+
 **Stage**
 A discrete step in a job's pipeline. The canonical stages are `fetch`, `transcribe`, `llm_format`, `llm_merge`, and `mealie_import`. `llm_merge` refines the local recipe draft with transcription — it is not a Mealie-side merge.
 _Avoid_: step, phase
@@ -82,8 +85,12 @@ _Avoid_: classification
 The per-field score (quantity, unit, food, comment, average) the parser assigns to an ingredient classification; it decides whether human review is required.
 _Avoid_: score, certainty
 
+**Confidence band**
+The discrete tier an ingredient's food confidence falls into: `:high` (≥ 0.95), `:medium` (≥ 0.85), `:low` (< 0.85), or `:unknown` (no score). Ruled by `Ingredient.confidence_band/1`.
+_Avoid_: score, certainty
+
 **Unknown ingredient**
-An ingredient the parser could not confidently classify — food confidence below 0.85, or `food.id`/`unit.id` is null.
+An ingredient the parser could not confidently classify — food or unit confidence below 0.85, or `food.id`/`unit.id` is null. Ruled by `Ingredient.needs_review?/1`.
 _Avoid_: unrecognized ingredient, low-confidence ingredient
 
 **Batch review**

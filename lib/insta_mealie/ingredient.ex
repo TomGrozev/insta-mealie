@@ -174,6 +174,26 @@ defmodule InstaMealie.Ingredient do
   end
 
   @doc """
+  Returns the confidence band for the ingredient's food confidence.
+
+  - `:high` — food confidence ≥ 0.95
+  - `:medium` — food confidence ≥ 0.85
+  - `:low` — food confidence < 0.85
+  - `:unknown` — no confidence score available
+  """
+  @spec confidence_band(t()) :: :high | :medium | :low | :unknown
+  def confidence_band(%__MODULE__{} = ing) do
+    conf = ing.food.confidence
+
+    cond do
+      is_nil(conf) -> :unknown
+      conf >= 0.95 -> :high
+      conf >= 0.85 -> :medium
+      true -> :low
+    end
+  end
+
+  @doc """
   Apply user resolutions from the review screen. For each index in
   `resolutions`, set the matching ingredient's food/unit/food_id/unit_id
   from the resolution map and mark it `:resolved`. Ingredients without a

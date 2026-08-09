@@ -1,10 +1,9 @@
 defmodule InstaMealieWeb.ReviewLive do
   use InstaMealieWeb, :live_view
 
+  alias InstaMealie.Ingredient
   alias InstaMealie.Pipeline
   alias InstaMealie.PubSub
-
-  @confidence_threshold Application.compile_env(:insta_mealie, :insta_mealie, [])[:ingredient_confidence_threshold] || 0.85
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -446,8 +445,8 @@ defmodule InstaMealieWeb.ReviewLive do
                                 , {parts.note}
                               </span>
                             <% end %>
-                            <span class={confidence_badge(ing.food.confidence)}>
-                              {confidence_percent_label(ing.food.confidence)}
+                            <span class={confidence_badge(Ingredient.confidence_band(ing))}>
+                              {confidence_percent_label(Ingredient.confidence_band(ing))}
                             </span>
                           </div>
                         </div>
@@ -470,8 +469,8 @@ defmodule InstaMealieWeb.ReviewLive do
                                 {ing.raw}
                               </p>
                             </div>
-                            <span class={confidence_badge(ing.food.confidence)}>
-                              {confidence_label(ing.food.confidence)}
+                            <span class={confidence_badge(Ingredient.confidence_band(ing))}>
+                              {confidence_label(Ingredient.confidence_band(ing))}
                             </span>
                           </div>
                         </div>
@@ -921,28 +920,28 @@ defmodule InstaMealieWeb.ReviewLive do
     "#{count} #{plural} to import"
   end
 
-  defp confidence_badge(nil),
-    do: "rounded-full bg-warning/15 px-2 py-0.5 text-xs font-medium text-warning"
-
-  defp confidence_badge(c) when c >= @confidence_threshold,
+  defp confidence_badge(:high),
     do: "rounded-full bg-success/15 px-2 py-0.5 text-xs font-medium text-success"
 
-  defp confidence_badge(c) when c >= 0.5,
+  defp confidence_badge(:medium),
     do: "rounded-full bg-warning/15 px-2 py-0.5 text-xs font-medium text-warning"
 
-  defp confidence_badge(_),
+  defp confidence_badge(:low),
     do: "rounded-full bg-error/15 px-2 py-0.5 text-xs font-medium text-error"
 
-  defp confidence_label(nil), do: "Unknown"
-  defp confidence_label(c) when c >= @confidence_threshold, do: "High"
-  defp confidence_label(c) when c >= 0.5, do: "Medium"
-  defp confidence_label(_), do: "Low"
+  defp confidence_badge(:unknown),
+    do: "rounded-full bg-base-300/30 px-2 py-0.5 text-xs font-medium text-base-content/50"
+
+  defp confidence_label(:high), do: "High"
+  defp confidence_label(:medium), do: "Medium"
+  defp confidence_label(:low), do: "Low"
+  defp confidence_label(:unknown), do: "Unknown"
 
   defp initial_food(ing), do: ing.food.name || ing.raw || ""
   defp initial_unit(ing), do: ing.unit.name || ""
 
-  defp confidence_percent_label(nil), do: "Unknown confidence"
-  defp confidence_percent_label(c) when c >= 1.0, do: "100% confidence"
-  defp confidence_percent_label(c) when c >= 0, do: "#{round(c * 100)}% confidence"
-  defp confidence_percent_label(_), do: "Unknown confidence"
+  defp confidence_percent_label(:high), do: "High confidence"
+  defp confidence_percent_label(:medium), do: "Medium confidence"
+  defp confidence_percent_label(:low), do: "Low confidence"
+  defp confidence_percent_label(:unknown), do: "Unknown confidence"
 end

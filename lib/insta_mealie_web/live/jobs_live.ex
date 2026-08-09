@@ -6,7 +6,6 @@ defmodule InstaMealieWeb.JobsLive do
   alias InstaMealie.PubSub
 
   @topic "jobs"
-  @retry_cap 2
   @stages_order [:fetch, :transcribe, :llm_format, :llm_merge, :mealie_import]
 
   @impl true
@@ -336,6 +335,7 @@ defmodule InstaMealieWeb.JobsLive do
 
   def job_card(assigns) do
     ~H"""
+    <% actions = Pipeline.available_actions(@job) %>
     <div class="rounded-2xl border border-base-300/70 bg-base-200/50 p-4 shadow-sm transition hover:border-base-300">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
@@ -372,7 +372,7 @@ defmodule InstaMealieWeb.JobsLive do
         <.pipeline_strip stages={@job.stages} />
       </div>
 
-      <%= if @job.state not in [:succeeded, :failed, :cancelled, :queued] do %>
+      <%= if :cancel in actions do %>
         <div class="mt-2 flex justify-end">
           <button
             id={"cancel-#{@job.id}"}
@@ -417,15 +417,15 @@ defmodule InstaMealieWeb.JobsLive do
             </span>
           </div>
 
-          <%= if dead_row?(@job) do %>
+          <%= if Pipeline.dead?(@job) do %>
             <p class="mt-2 text-xs text-base-content/50">
               This job is dead — the recipe was rejected by Mealie. Fix the source and create a new job.
             </p>
           <% else %>
-            <p class="mt-2 text-xs text-base-content/60">{cta_explainer(@job)}</p>
+            <p class="mt-2 text-xs text-base-content/60">{cta_explainer(@job, actions)}</p>
 
             <div class="mt-2 flex flex-wrap gap-2">
-              <%= if show_retry?(@job) do %>
+              <%= if :retry in actions do %>
                 <button
                   id={"retry-#{@job.id}"}
                   type="button"
@@ -433,11 +433,11 @@ defmodule InstaMealieWeb.JobsLive do
                   phx-value-job-id={@job.id}
                   class="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
                 >
-                  Retry ({per_stage_retries_left(@job)} left)
+                  Retry ({Pipeline.retries_left(@job)} left)
                 </button>
               <% end %>
 
-              <%= if show_paste_caption?(@job) do %>
+              <%= if :paste_caption in actions do %>
                 <button
                   id={"paste-caption-#{@job.id}"}
                   type="button"
@@ -449,7 +449,7 @@ defmodule InstaMealieWeb.JobsLive do
                 </button>
               <% end %>
 
-              <%= if show_transcribe_anyway?(@job) do %>
+              <%= if :transcribe_anyway in actions do %>
                 <button
                   id={"transcribe-anyway-#{@job.id}"}
                   type="button"
@@ -504,30 +504,9 @@ defmodule InstaMealieWeb.JobsLive do
   end
 
   # ---- CTA matrix (per T5 / decision #18, Variant B) ----
-
-  defp retryable_stage?(job) do
-    case {job.error_stage, job.error_class} do
-      {:mealie_import, :validation} -> false
-      {:fetch, :ip_banned} -> false
-      {:llm_format, :incomplete_caption} -> false
-      {:mealie_import, class} -> class in [:network, :auth, :api_error]
-      {stage, _class} when stage in [:fetch, :transcribe, :llm_format, :llm_merge] -> true
-      _ -> false
-    end
-  end
-
-  defp per_stage_retries_left(job) do
-    @retry_cap - Map.get(job.retry_count, job.error_stage, 0)
-  end
-
-  defp show_retry?(job), do: retryable_stage?(job) and per_stage_retries_left(job) > 0
-
-  defp show_paste_caption?(job), do: job.error_stage == :fetch
-
-  defp show_transcribe_anyway?(job),
-    do: job.error_stage in [:transcribe, :llm_merge] and job.mode == :url
-
-  defp dead_row?(job), do: job.error_stage == :mealie_import and job.error_class == :validation
+  # The CTA logic now lives in `InstaMealie.Pipeline.available_actions/1` —
+  # this module just renders the actions it returns. The remaining helpers
+  # here are pure presentation: copy and banner styling.
 
   defp transcribe_cta_label(%{error_stage: :llm_merge}), do: "Import caption-only"
   defp transcribe_cta_label(_), do: "Transcribe-anyway"
@@ -535,14 +514,14 @@ defmodule InstaMealieWeb.JobsLive do
   defp raw_diagnostics(job), do: to_string(job.error_summary || "")
 
   defp banner_classes(job) do
-    if dead_row?(job) do
+    if Pipeline.dead?(job) do
       "bg-base-200 text-base-content/60"
     else
       "bg-error/10 text-error"
     end
   end
 
-  defp cta_explainer(job) do
+  defp cta_explainer(job, actions) do
     case job.error_stage do
       :transcribe ->
         "The job will continue with the caption-only recipe from routing, skipping the failed audio"
@@ -551,7 +530,7 @@ defmodule InstaMealieWeb.JobsLive do
         "Caption alone has a complete recipe — you can import without the audio"
 
       :fetch ->
-        if show_retry?(job) do
+        if :retry in actions do
           "Fetch failed. Retry, or paste the caption to continue without the reel."
         else
           "Fetch is blocked in this environment. Paste the caption to continue without the reel."

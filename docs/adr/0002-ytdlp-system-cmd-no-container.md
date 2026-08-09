@@ -10,3 +10,7 @@ Reels are downloaded by yt-dlp, a fast-moving binary whose Instagram-access beha
 **Consequences**
 - Boot preflight must verify yt-dlp presence, version (≥ 2026.07.04), and impersonation support, halting boot if absent.
 - An absent binary is a boot-time failure, not a per-job error.
+
+## Note (2026-08-09)
+
+Phase 6 of the pipeline remediation moved yt-dlp execution into a supervised Task, but the underlying mechanism remains `System.cmd`. A future change may move to `Port.open({:spawn_executable, ...})` to enable OS-level process killing on timeout/cancel (#48). The "no container" decision stands.

@@ -116,6 +116,61 @@ defmodule InstaMealie.Pipeline do
   """
   def error_retryable?(%Error{} = error), do: Error.retryable?(error)
 
+  def error_retryable?(%Job{error_class: class}) when not is_nil(class) do
+    Error.retryable?(%Error{class: class})
+  end
+
+  def error_retryable?(_job), do: false
+
+  @doc "Returns the number of retries remaining for the current error stage."
+  def retries_left(%Job{error_stage: stage, retry_count: retries}) when not is_nil(stage) do
+    max(0, 2 - Map.get(retries, stage, 0))
+  end
+
+  def retries_left(_job), do: 0
+
+  @doc "True when a job is terminal with a non-retryable error."
+  def dead?(%Job{state: :failed} = job), do: not error_retryable?(job)
+  def dead?(_job), do: false
+
+  @doc """
+  Returns the set of available actions for a job.
+
+  Possible actions: `:retry`, `:paste_caption`, `:transcribe_anyway`, `:cancel`.
+  """
+  def available_actions(%Job{} = job) do
+    if dead?(job) do
+      []
+    else
+      actions = []
+
+      actions =
+        if job.state not in [:succeeded, :failed, :cancelled],
+          do: [:cancel | actions],
+          else: actions
+
+      # Paste-caption: available when fetch failed on a URL job.
+      actions =
+        if job.error_stage == :fetch and job.mode == :url,
+          do: [:paste_caption | actions],
+          else: actions
+
+      # Transcribe-anyway: available when caption-only routing skipped transcription.
+      actions =
+        if job.mode == :caption_only and Map.get(job.stages, :transcribe) == :skipped,
+          do: [:transcribe_anyway | actions],
+          else: actions
+
+      # Retry: available when the error is retryable and the per-stage cap is not exceeded.
+      actions =
+        if error_retryable?(job) and retries_left(job) > 0,
+          do: [:retry | actions],
+          else: actions
+
+      Enum.reverse(actions)
+    end
+  end
+
   @doc """
   Retry a job from the start, preserving its `job_id`. Each retry is counted
   per failing stage (capped at 2 in the UI — see `InstaMealieWeb.JobsLive`);
@@ -124,11 +179,20 @@ defmodule InstaMealie.Pipeline do
   Thin facade: forwards to the job's GenServer, which owns the mutation and
   re-runs the FSM. A mealie_import-only retry re-runs the import on the same
   job without resetting the recipe; all other retries re-run from `:created`.
+
+  Returns `{:error, :retry_cap_exceeded}` when the failing stage's retry
+  budget is exhausted, or `{:error, :not_found}` for an unknown `job_id`.
   """
   def retry(job_id) when is_binary(job_id) do
-    case JobStore.get(job_id) do
-      nil -> {:error, :not_found}
-      _job -> wrap_job_id(call_job(job_id, :retry), job_id)
+    with {:ok, pid} <- ensure_job_process(job_id),
+         job when not is_nil(job) <- JobStore.get(job_id) do
+      if retries_left(job) > 0 do
+        wrap_job_id(GenServer.call(pid, :retry, 60_000), job_id)
+      else
+        {:error, :retry_cap_exceeded}
+      end
+    else
+      {:error, _} = error -> error
     end
   end
 
