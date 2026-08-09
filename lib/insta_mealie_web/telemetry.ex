@@ -13,10 +13,19 @@ defmodule InstaMealieWeb.Telemetry do
       # every 10_000ms. Learn more here: https://telemetry-metrics.hexdocs.pm
       {:telemetry_poller, measurements: periodic_measurements(), period: 10_000}
       # Add reporters as children of your supervision tree.
-      # {Telemetry.Metrics.ConsoleReporter, metrics: metrics()}
-    ]
+    ] ++ console_reporter()
 
     Supervisor.init(children, strategy: :one_for_one)
+  end
+
+  # Conditionally attach the optional ConsoleReporter when its package is
+  # available; production deployments may leave it out, dev/test pick it up.
+  defp console_reporter do
+    if Code.ensure_loaded?(Telemetry.Metrics.ConsoleReporter) do
+      [{Telemetry.Metrics.ConsoleReporter, metrics: metrics()}]
+    else
+      []
+    end
   end
 
   def metrics do
@@ -52,27 +61,21 @@ defmodule InstaMealieWeb.Telemetry do
         unit: {:native, :millisecond}
       ),
 
-      # Database Metrics
-      summary("insta_mealie.repo.query.total_time",
-        unit: {:native, :millisecond},
-        description: "The sum of the other measurements"
+      # Pipeline stage duration — distribution tagged by stage and status
+      Telemetry.Metrics.distribution("insta_mealie.pipeline.stage.stop.duration",
+        tags: [:stage, :status],
+        unit: {:native, :millisecond}
       ),
-      summary("insta_mealie.repo.query.decode_time",
-        unit: {:native, :millisecond},
-        description: "The time spent decoding the data received from the database"
+
+      # Job completion — summary tagged by terminal state and error class
+      Telemetry.Metrics.summary("insta_mealie.pipeline.job.stop",
+        tags: [:terminal_state, :error_class],
+        unit: {:native, :millisecond}
       ),
-      summary("insta_mealie.repo.query.query_time",
-        unit: {:native, :millisecond},
-        description: "The time spent executing the query"
-      ),
-      summary("insta_mealie.repo.query.queue_time",
-        unit: {:native, :millisecond},
-        description: "The time spent waiting for a database connection"
-      ),
-      summary("insta_mealie.repo.query.idle_time",
-        unit: {:native, :millisecond},
-        description:
-          "The time the connection spent waiting before being checked out for the query"
+
+      # Failure counter — count tagged by stage and error class
+      Telemetry.Metrics.counter("insta_mealie.pipeline.failure.count",
+        tags: [:stage, :error_class]
       ),
 
       # VM Metrics

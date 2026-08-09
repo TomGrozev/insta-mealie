@@ -22,6 +22,8 @@ defmodule InstaMealieWeb.JobsLive do
       |> assign(:degraded, InstaMealie.YtDlp.Cli.degraded?())
       |> assign(:caption_editing_id, nil)
       |> assign(:caption_form, to_form(%{"caption" => ""}))
+      |> assign(:duplicate_warning, nil)
+      |> assign(:last_submitted_url, nil)
       |> stream(:jobs, jobs, reset: true)
       |> assign(:jobs_empty?, jobs == [])
 
@@ -36,10 +38,44 @@ defmodule InstaMealieWeb.JobsLive do
       {:noreply, assign(socket, :form_error, "Paste a reel URL to begin.")}
     else
       case Pipeline.create_job(%{url: url}) do
-        {:ok, _id} -> {:noreply, assign(socket, :form_error, nil)}
-        {:ok, _id, _position} -> {:noreply, assign(socket, :form_error, nil)}
-        {:error, _} -> {:noreply, assign(socket, :form_error, "Could not start the job.")}
+        {:ok, _id} ->
+          {:noreply, assign(socket, form_error: nil, duplicate_warning: nil)}
+
+        {:ok, _id, _position} ->
+          {:noreply, assign(socket, form_error: nil, duplicate_warning: nil)}
+
+        {:error, :duplicate_url, existing_id} ->
+          warning = build_duplicate_warning(Pipeline.get_job(existing_id))
+
+          {:noreply,
+           assign(socket,
+             form_error: nil,
+             duplicate_warning: warning,
+             last_submitted_url: url
+           )}
+
+        {:error, _} ->
+          {:noreply, assign(socket, :form_error, "Could not start the job.")}
       end
+    end
+  end
+
+  def handle_event("force-import", _params, socket) do
+    case socket.assigns.last_submitted_url do
+      nil ->
+        {:noreply, assign(socket, :duplicate_warning, nil)}
+
+      url ->
+        case Pipeline.create_job(%{url: url, force: true}) do
+          {:ok, _id} ->
+            {:noreply, assign(socket, form_error: nil, duplicate_warning: nil)}
+
+          {:ok, _id, _position} ->
+            {:noreply, assign(socket, form_error: nil, duplicate_warning: nil)}
+
+          {:error, _} ->
+            {:noreply, assign(socket, :form_error, "Could not start the job.")}
+        end
     end
   end
 
@@ -178,6 +214,42 @@ defmodule InstaMealieWeb.JobsLive do
           <%= if @form_error do %>
             <p class="text-sm text-error">{@form_error}</p>
           <% end %>
+        <% end %>
+
+        <%= if @duplicate_warning do %>
+          <div class="rounded-2xl border border-warning/40 bg-warning/10 p-4">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div class="min-w-0 flex-1 space-y-1">
+                <p class="text-sm font-semibold text-warning">
+                  A job for this URL already exists.
+                </p>
+                <p class="text-xs text-base-content/60">
+                  {duplicate_warning_detail(@duplicate_warning)}
+                </p>
+                <div class="mt-2 flex flex-wrap gap-2">
+                  <%= if @duplicate_warning.deep_link do %>
+                    <a
+                      id="duplicate-deep-link"
+                      href={@duplicate_warning.deep_link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-content transition hover:opacity-90"
+                    >
+                      View in Mealie <.icon name="hero-arrow-top-right-on-square" class="inline size-4" />
+                    </a>
+                  <% end %>
+                  <button
+                    id="force-import"
+                    type="button"
+                    phx-click="force-import"
+                    class="rounded-lg border border-base-300 bg-base-100 px-3 py-1.5 text-sm font-medium text-base-content transition hover:bg-base-200 active:scale-[0.98]"
+                  >
+                    Import anyway
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         <% end %>
 
         <div class="rounded-2xl border border-base-300/60 bg-base-200/40 p-4">
@@ -543,4 +615,32 @@ defmodule InstaMealieWeb.JobsLive do
   defp verdict_text(%{state: :created}), do: "Queued"
   defp verdict_text(%{state: :caption_pasting}), do: "Awaiting caption"
   defp verdict_text(_), do: "Working…"
+
+  # ---- Duplicate URL warning ----
+
+  # Build the warning payload shown when a freshly-submitted URL already maps
+  # to a non-failed, non-cancelled job. If the existing job succeeded we
+  # surface its Mealie deep link; otherwise the user can still see the row in
+  # the recent jobs list below.
+  defp build_duplicate_warning(%{state: :succeeded, deep_link: deep_link} = job)
+       when is_binary(deep_link),
+       do: %{id: job.id, deep_link: deep_link, state: :succeeded}
+
+  defp build_duplicate_warning(job) do
+    %{id: job.id, deep_link: nil, state: job.state}
+  end
+
+  defp duplicate_warning_detail(%{state: :succeeded}) do
+    "The previous job for this URL is already in Mealie. Open it, or import again anyway."
+  end
+
+  defp duplicate_warning_detail(%{state: state}) do
+    "The previous job is still #{state_label(state)}. Importing will create a second job."
+  end
+
+  defp state_label(:queued), do: "queued"
+  defp state_label(:created), do: "starting"
+  defp state_label(:needs_review), do: "waiting for ingredient review"
+  defp state_label(state) when is_atom(state), do: state |> to_string() |> String.replace("_", " ")
+  defp state_label(_), do: "in progress"
 end

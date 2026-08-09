@@ -29,6 +29,7 @@ defmodule InstaMealie.Ingredient do
           note: String.t() | nil,
           index: non_neg_integer() | nil,
           raw: String.t() | nil,
+          average_confidence: number() | nil,
           status: status()
         }
 
@@ -38,6 +39,7 @@ defmodule InstaMealie.Ingredient do
             note: nil,
             index: nil,
             raw: nil,
+            average_confidence: nil,
             status: :unparsed
 
   @doc """
@@ -72,6 +74,7 @@ defmodule InstaMealie.Ingredient do
       },
       note: InstaMealie.Utils.map_get(map, "note"),
       raw: InstaMealie.Utils.map_get(map, "raw") || InstaMealie.Utils.map_get(map, "note"),
+      average_confidence: InstaMealie.Utils.map_get(map, "average_confidence"),
       status: :parsed
     }
   end
@@ -101,22 +104,15 @@ defmodule InstaMealie.Ingredient do
   ingredient's `:note`) and the `:index` field is set to the ingredient's
   position in the list.
 
-  Options:
-  - `:food_threshold` (default `0.85`) — minimum food confidence required
-    to mark an ingredient `:parsed`.
-  - `:unit_threshold` (default `0.85`) — minimum unit confidence required
-    to mark an ingredient `:parsed`.
+  The review decision is delegated to `needs_review?/1`, which is the sole
+  owner of that policy.
 
   If the parser returns fewer entries than there are ingredients, the
   trailing ingredients are left unchanged. If the parser returns more
   entries, the extras are dropped.
   """
-  @spec apply_parse([t()], [map()], keyword()) :: [t()]
-  def apply_parse(ingredients, parsed, opts \\ [])
-      when is_list(ingredients) and is_list(parsed) do
-    food_threshold = Keyword.get(opts, :food_threshold, 0.85)
-    unit_threshold = Keyword.get(opts, :unit_threshold, 0.85)
-
+  @spec apply_parse([t()], [map()]) :: [t()]
+  def apply_parse(ingredients, parsed) when is_list(ingredients) and is_list(parsed) do
     ingredients
     |> Enum.with_index()
     |> Enum.map(fn {ing, i} ->
@@ -125,18 +121,7 @@ defmodule InstaMealie.Ingredient do
           %{ing | index: i}
 
         p ->
-          food_conf = Map.get(p, "food_confidence")
-          food_id = Map.get(p, "food_id")
-          unit_conf = Map.get(p, "unit_confidence")
-          unit_id = Map.get(p, "unit_id")
-
-          needs_review =
-            food_conf == nil or food_conf < food_threshold or food_id == nil or
-              unit_conf == nil or unit_conf < unit_threshold or unit_id == nil
-
-          status = if needs_review, do: :needs_review, else: :parsed
-
-          %{ing |
+          candidate = %{ing |
             index: i,
             raw: ing.raw || ing.note,
             quantity: p["quantity"],
@@ -151,10 +136,41 @@ defmodule InstaMealie.Ingredient do
               confidence: Map.get(p, "unit_confidence")
             },
             note: p["note"],
-            status: status
+            average_confidence: Map.get(p, "average_confidence")
           }
+
+          %{candidate | status: if(needs_review?(candidate), do: :needs_review, else: :parsed)}
       end
     end)
+  end
+
+  @threshold 0.85
+
+  @doc """
+  Returns true if this ingredient needs human review before import.
+
+  An ingredient needs review when:
+  - Either food or unit has no Mealie id, OR
+  - Either food or unit confidence is below 0.85
+
+  Falls back to `average_confidence` when a per-field confidence score
+  is absent. Treats "no score and no id" as needs-review.
+  """
+  @spec needs_review?(t()) :: boolean()
+  def needs_review?(%__MODULE__{} = ing) do
+    food_ok = ing.food.id && food_conf_ok?(ing)
+    unit_ok = ing.unit.id && unit_conf_ok?(ing)
+    not (food_ok and unit_ok)
+  end
+
+  defp food_conf_ok?(ing) do
+    conf = ing.food.confidence || ing.average_confidence
+    conf && conf >= @threshold
+  end
+
+  defp unit_conf_ok?(ing) do
+    conf = ing.unit.confidence || ing.average_confidence
+    conf && conf >= @threshold
   end
 
   @doc """

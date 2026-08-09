@@ -8,6 +8,7 @@ defmodule InstaMealie.Pipeline do
   Supervision tree:
     - a Registry (unique) for per-job GenServer lookup
     - a DynamicSupervisor running one GenServer per job
+    - a Task.Supervisor for the per-stage blocking work (Phase 6)
     - a table-owning Sweeper that holds the ETS job store and runs the
       ~5 minute TTL sweep
   """
@@ -30,6 +31,7 @@ defmodule InstaMealie.Pipeline do
     children = [
       {Registry, [keys: :unique, name: __MODULE__.Registry]},
       {DynamicSupervisor, [strategy: :one_for_one, name: __MODULE__.JobSupervisor]},
+      {Task.Supervisor, [name: __MODULE__.TaskSupervisor]},
       {JobAdmission, []},
       {Sweeper, []}
     ]
@@ -220,25 +222,60 @@ defmodule InstaMealie.Pipeline do
         {:error, :already_terminal}
 
       _job ->
-        case Registry.lookup(__MODULE__.Registry, job_id) do
-          [{pid, _}] ->
+        case ensure_job_process(job_id) do
+          {:ok, pid} ->
             GenServer.cast(pid, :cancel)
             {:ok, job_id}
 
-          [] ->
-            {:error, :process_gone}
+          {:error, _} = error ->
+            error
+        end
+      end
+  end
+
+  @doc """
+  Ensure a job GenServer is alive for the given `job_id`.
+
+  If the process is already registered, returns `{:ok, pid}`. If the process
+  is gone but the ETS row exists and the job is non-terminal, restarts the
+  GenServer from the snapshot (revive path) and returns `{:ok, pid}`.
+  Otherwise returns `{:error, :not_found}` (no row) or `{:error, :terminal}`
+  (row exists but the job is already in a final state).
+  """
+  def ensure_job_process(job_id) do
+    case Registry.lookup(__MODULE__.Registry, job_id) do
+      [{pid, _}] ->
+        {:ok, pid}
+
+      [] ->
+        case JobStore.get(job_id) do
+          nil ->
+            {:error, :not_found}
+
+          %{state: state} when state in [:succeeded, :failed, :cancelled] ->
+            {:error, :terminal}
+
+          job ->
+            # Restart from snapshot — revive path.
+            case DynamicSupervisor.start_child(
+                   JobSupervisor,
+                   {Job, {:revive, job}}
+                 ) do
+              {:ok, pid} -> {:ok, pid}
+              {:error, reason} -> {:error, reason}
+            end
         end
     end
   end
 
   # Look up the job's GenServer pid in the registry and forward the command.
-  # Returns `{:error, :process_gone}` if the process has already exited (e.g.
-  # the row is still in ETS because the sweeper hasn't run yet, but the
-  # GenServer is no longer registered).
+  # `ensure_job_process/1` handles the revive-from-store case, so by the time
+  # we get a pid the GenServer is definitely running. A failed lookup surfaces
+  # as `{:error, :not_found}` (no row) or `{:error, :terminal}` (terminal).
   defp call_job(job_id, message) do
-    case Registry.lookup(__MODULE__.Registry, job_id) do
-      [{pid, _}] -> GenServer.call(pid, message, 60_000)
-      [] -> {:error, :process_gone}
+    case ensure_job_process(job_id) do
+      {:ok, pid} -> GenServer.call(pid, message, 60_000)
+      {:error, _} = error -> error
     end
   end
 
@@ -320,7 +357,7 @@ defmodule InstaMealie.Pipeline do
   defp stage_duration(job, stage) do
     case Map.get(job.stage_started_at || %{}, stage) do
       nil -> nil
-      started -> System.monotonic_time(:millisecond) - started
+      started -> System.monotonic_time() - started
     end
   end
 
@@ -350,7 +387,7 @@ defmodule InstaMealie.Pipeline do
 
     started_at =
       (job.stage_started_at || %{})
-      |> Map.put(stage, System.monotonic_time(:millisecond))
+      |> Map.put(stage, System.monotonic_time())
 
     :telemetry.execute(
       [:insta_mealie, :pipeline, :stage, :start],
@@ -507,14 +544,18 @@ defmodule InstaMealie.Pipeline do
   defp check_duplicate_url(normalized_url, false) do
     existing =
       JobStore.list()
-      |> Enum.find(fn job -> job.url && normalize_url(job.url) == normalized_url end)
+      |> Enum.find(fn job ->
+        job.url &&
+          job.state not in [:failed, :cancelled] &&
+          normalize_url(job.url) == normalized_url
+      end)
 
     if existing do
       Logger.warning(
         "[pipeline] duplicate URL detected, existing job #{existing.id}"
       )
 
-      {:error, Error.new(:duplicate_url, "duplicate URL, existing job #{existing.id}")}
+      {:error, :duplicate_url, existing.id}
     else
       :ok
     end
