@@ -210,7 +210,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
       html = render(view)
 
       assert has_element?(view, "#food-0")
-      assert html =~ "➕ Custom…"
+      assert html =~ "Search Mealie foods or enter a custom food"
       assert html =~ "mystery-spice"
       assert html =~ "Ingredient Review"
     end
@@ -246,9 +246,8 @@ defmodule InstaMealieWeb.ReviewLiveTest do
       view = mount_review_view(id)
       html = render(view)
 
-      # The custom food input should exist and not be hidden
-      assert html =~ "custom-food-0"
-      refute html =~ ~s(id="custom-food-0" class="[^"]*hidden)
+      # The food combo box input should exist and be visible
+      assert has_element?(view, "#food-0")
       assert html =~ "mystery-spice"
     end
   end

@@ -16,16 +16,18 @@ defmodule InstaMealie.YtDlp do
   Classified fetch failures: extraction | rate_limited | cookie_expired |
   network | ip_banned.
   """
+  alias InstaMealie.Error
+
   @callback fetch_metadata(url :: String.t(), opts :: keyword()) ::
-              {:ok, map()} | {:error, atom(), term()}
+              {:ok, map()} | {:error, Error.t()}
 
   @callback fetch_audio(url :: String.t(), opts :: keyword()) ::
-              {:ok, map()} | {:error, atom(), term()}
+              {:ok, map()} | {:error, Error.t()}
 
-  @spec fetch_metadata(String.t(), keyword()) :: {:ok, map()} | {:error, atom(), term()}
+  @spec fetch_metadata(String.t(), keyword()) :: {:ok, map()} | {:error, Error.t()}
   def fetch_metadata(url, opts \\ []), do: impl().fetch_metadata(url, opts)
 
-  @spec fetch_audio(String.t(), keyword()) :: {:ok, map()} | {:error, atom(), term()}
+  @spec fetch_audio(String.t(), keyword()) :: {:ok, map()} | {:error, Error.t()}
   def fetch_audio(url, opts \\ []), do: impl().fetch_audio(url, opts)
 
   defp impl, do: Application.get_env(:insta_mealie, __MODULE__, InstaMealie.YtDlp.Cli)

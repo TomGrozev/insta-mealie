@@ -39,9 +39,6 @@ defmodule InstaMealie.TestCase do
   end
 
   setup do
-    # Make stubs global so GenServer processes can access them
-    Mox.set_mox_global()
-
     InstaMealie.Pipeline.JobStore.clear()
     InstaMealie.Pipeline.JobAdmission.reset()
 
@@ -68,7 +65,9 @@ defmodule InstaMealie.TestCase do
     end)
 
     # Default adapter stubs for LLM, Whisper, and Mealie
-    Application.put_env(:insta_mealie, :llm_http_adapter, fn _model, _body ->
+    Application.put_env(:insta_mealie, InstaMealie.LLM, InstaMealie.LLM.Mock)
+
+    Mox.stub(InstaMealie.LLM.Mock, :chat, fn _model, _messages ->
       {:ok,
        %{
          "choices" => [
@@ -86,7 +85,9 @@ defmodule InstaMealie.TestCase do
        }}
     end)
 
-    Application.put_env(:insta_mealie, :whisper_http_adapter, fn _ ->
+    Application.put_env(:insta_mealie, InstaMealie.Whisper, InstaMealie.Whisper.Mock)
+
+    Mox.stub(InstaMealie.Whisper.Mock, :transcribe, fn _model, _file_path, _prompt, _language ->
       {:ok, "Transcribed audio: mix oats almonds syrup oil salt, bake at 160C for 40 minutes."}
     end)
 
@@ -143,16 +144,16 @@ defmodule InstaMealie.TestCase do
       # Restore defaults
       Application.put_env(:insta_mealie, InstaMealie.YtDlp, InstaMealie.YtDlp.Cli)
 
-      Enum.each([:llm_http_adapter, :mealie_http_adapter, :whisper_http_adapter], fn k ->
-        try do
-          Application.delete_env(:insta_mealie, k)
-        rescue
-          _ -> :ok
-        end
-      end)
+      Application.delete_env(:insta_mealie, InstaMealie.LLM)
+      Application.delete_env(:insta_mealie, InstaMealie.Whisper)
+
+      try do
+        Application.delete_env(:insta_mealie, :mealie_http_adapter)
+      rescue
+        _ -> :ok
+      end
     end)
 
-    Mox.verify_on_exit!()
     :ok
   end
 end

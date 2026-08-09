@@ -1,17 +1,60 @@
+defmodule InstaMealie.Mealie.RecipeRef do
+  @moduledoc "A reference to a Mealie recipe: its name and its slug."
+  @enforce_keys [:slug]
+  defstruct [:slug, :name]
+
+  @type t :: %__MODULE__{slug: String.t(), name: String.t() | nil}
+
+  @doc """
+  Extract a recipe reference from a Mealie search result map.
+
+  Returns `{:ok, %RecipeRef{}}` if a slug is present, or `:error` otherwise.
+  Does NOT fall back to an id field — a slug is required per the domain glossary.
+  """
+  @spec from_result(map()) :: {:ok, t()} | :error
+  def from_result(result) when is_map(result) do
+    slug = Map.get(result, "slug") || Map.get(result, :slug)
+    name = Map.get(result, "name") || Map.get(result, :name)
+
+    if slug do
+      {:ok, %__MODULE__{slug: slug, name: name}}
+    else
+      :error
+    end
+  end
+end
+
 defmodule InstaMealie.Mealie do
   @moduledoc """
   Single Mealie module for pushing recipe drafts into a Mealie instance.
 
+  This module is a thin façade over `InstaMealie.Mealie.Adapter`. Each
+  public function delegates to the configured adapter (default
+  `InstaMealie.Mealie.Http`) and adds logging + the post-processing that
+  belongs at the application boundary (e.g. shaping the parse response,
+  rolling back an orphan draft on PATCH failure).
+
   The create flow is POST /api/recipes with a name to obtain a slug,
-  then PUT /api/recipes/{slug} with the full recipe.
+  then PATCH /api/recipes/{slug} with the full recipe.
   """
 
   require Logger
+  alias InstaMealie.Error
   alias InstaMealie.Recipe
+  alias InstaMealie.Mealie.RecipeRef
+
+  # Resolve the configured adapter at call time so a test or alternate
+  # implementation can be swapped in via `Application.put_env/3` without
+  # a recompile. Default is the production HTTP client.
+  defp impl,
+    do: Application.get_env(:insta_mealie, InstaMealie.Mealie, InstaMealie.Mealie.Http)
 
   # ── Public API ─────────────────────────────────────────────────────
 
-  @spec deep_link(String.t()) :: String.t()
+  @doc "Build a deep link from a Mealie slug or RecipeRef."
+  def deep_link(%RecipeRef{slug: slug}), do: deep_link(slug)
+
+  @spec deep_link(String.t() | RecipeRef.t()) :: String.t()
   def deep_link(slug) when is_binary(slug) do
     cfg = Application.get_env(:insta_mealie, :mealie, [])
     base = cfg[:base_url] || "http://localhost:9000"
@@ -19,37 +62,27 @@ defmodule InstaMealie.Mealie do
     "#{base}/g/#{group}/r/#{slug}?edit=true"
   end
 
-  @spec search_foods(String.t()) :: {:ok, list()} | {:error, atom(), term()}
+  @spec search_foods(String.t()) :: {:ok, list()} | {:error, Error.t()}
   def search_foods(term) when is_binary(term), do: search_collection("foods", term)
 
-  @spec search_units(String.t()) :: {:ok, list()} | {:error, atom(), term()}
+  @spec search_units(String.t()) :: {:ok, list()} | {:error, Error.t()}
   def search_units(term) when is_binary(term), do: search_collection("units", term)
 
-  @spec search_recipes(String.t()) :: {:ok, list()} | {:error, atom(), term()}
-  def search_recipes(term) when is_binary(term) do
-    path = "/api/recipes?perPage=5&search=#{URI.encode_www_form(term)}"
+  @spec search_recipes(String.t()) :: {:ok, list()} | {:error, Error.t()}
+  def search_recipes(term) when is_binary(term), do: search_collection("recipes", term)
 
-    case request(:get, path) do
-      {:ok, body} ->
-        results =
-          if Map.has_key?(body, "items"),
-            do: body["items"],
-            else: Map.get(body, "data", [])
+  @doc """
+  Classify a `%Req.Response{}`-shaped map into `{:ok, body}` or
+  `{:error, %Error{}}`. Delegates to the configured adapter's
+  `classify_response/1` so callers can inspect HTTP responses without
+  going through the named operations.
+  """
+  def classify_response(resp),
+    do: impl().classify_response(resp)
 
-        Logger.info("[mealie] GET /api/recipes search=#{term} -> ok (results=#{length(results)})")
-        {:ok, results}
-
-      {:error, class, reason} ->
-        Logger.error("[mealie] GET /api/recipes search=#{term} failed (#{class}: #{reason})")
-        {:error, class, reason}
-    end
-  end
-
-  @spec parse_ingredients(list(String.t())) :: {:ok, list(map())} | {:error, atom(), term()}
+  @spec parse_ingredients(list(String.t())) :: {:ok, list(map())} | {:error, Error.t()}
   def parse_ingredients(list) when is_list(list) do
-    payload = %{"ingredients" => list}
-
-    case request(:post, "/api/parser/ingredients", payload) do
+    case impl().parse_ingredients(list) do
       {:ok, body} when is_list(body) ->
         Logger.info("[mealie] POST /api/parser/ingredients -> ok (parsed=#{length(body)})")
 
@@ -78,13 +111,12 @@ defmodule InstaMealie.Mealie do
 
         {:ok, parsed}
 
-      {:ok, _other} ->
-        Logger.warning("[mealie] POST /api/parser/ingredients returned unexpected response")
-        {:error, :api_error, "unexpected parse response"}
+      {:error, %Error{} = error} ->
+        Logger.error(
+          "[mealie] POST /api/parser/ingredients failed (#{error.class}: #{error.summary})"
+        )
 
-      {:error, class, reason} ->
-        Logger.error("[mealie] POST /api/parser/ingredients failed (#{class}: #{reason})")
-        {:error, class, reason}
+        {:error, error}
     end
   end
 
@@ -92,21 +124,25 @@ defmodule InstaMealie.Mealie do
   Import a recipe, optionally reusing an existing draft slug.
 
   This is the sole public write entrypoint into Mealie. When `existing_slug`
-  is a non-nil binary the POST step is skipped and the recipe is PUT directly
-  under that slug. When `nil` the normal POST-then-PUT flow runs; if the PUT
-  fails after a successful POST, the orphaned stub is deleted before the
-  error is returned so no draft is left dangling in Mealie.
+  is a non-nil binary the POST step is skipped and the recipe is PATCHed
+  directly under that slug. When `nil` the normal POST-then-PATCH flow runs;
+  if the PATCH fails after a successful POST, the orphaned stub is deleted
+  before the error is returned so no draft is left dangling in Mealie.
 
   On success returns `{:ok, slug, deep_link}`. On failure returns
-  `{:error, class, reason}`.
+  `{:error, %Error{}}`.
   """
   @spec import_recipe(Recipe.t(), String.t() | nil) ::
           {:ok, String.t(), String.t()}
-          | {:error, atom(), term()}
+          | {:error, Error.t()}
   def import_recipe(%Recipe{} = recipe, existing_slug) when is_binary(existing_slug) do
-    case update_recipe(existing_slug, recipe) do
-      {:ok, _slug} -> {:ok, existing_slug, deep_link(existing_slug)}
-      {:error, class, reason} -> {:error, class, reason}
+    case impl().patch_recipe(existing_slug, recipe) do
+      {:ok, _slug} ->
+        _ = impl().upload_image(existing_slug, recipe.image)
+        {:ok, existing_slug, deep_link(existing_slug)}
+
+      {:error, %Error{} = error} ->
+        {:error, error}
     end
   end
 
@@ -120,11 +156,14 @@ defmodule InstaMealie.Mealie do
         name ->
           case search_recipes(name) do
             {:ok, results} ->
-              match = Enum.find(results, fn r -> (r["name"] || r[:name]) == name end)
+              Enum.find_value(results, fn r ->
+                case RecipeRef.from_result(r) do
+                  {:ok, ref} when ref.name == name -> ref.slug
+                  _ -> nil
+                end
+              end)
 
-              if match, do: match["slug"] || match[:slug] || match["id"] || match[:id]
-
-            {:error, _class, _reason} ->
+            {:error, %Error{}} ->
               nil
           end
       end
@@ -133,222 +172,49 @@ defmodule InstaMealie.Mealie do
       # Reuse existing recipe
       Logger.info("[mealie] import_recipe found existing recipe #{slug}, reusing")
 
-      case update_recipe(slug, recipe) do
-        {:ok, _slug} -> {:ok, slug, deep_link(slug)}
-        {:error, class, reason} -> {:error, class, reason}
+      case impl().patch_recipe(slug, recipe) do
+        {:ok, _slug} ->
+          _ = impl().upload_image(slug, recipe.image)
+          {:ok, slug, deep_link(slug)}
+
+        {:error, %Error{} = error} ->
+          {:error, error}
       end
     else
-      case create_recipe(recipe) do
-        {:ok, slug} ->
-          case update_recipe(slug, recipe) do
-            {:ok, _slug} -> {:ok, slug, deep_link(slug)}
-            {:error, class, reason} ->
+      name = recipe.name || "Untitled recipe"
+
+      case impl().create_recipe(name) do
+        {:ok, %RecipeRef{slug: slug} = ref} ->
+          case impl().patch_recipe(slug, recipe) do
+            {:ok, _slug} ->
+              _ = impl().upload_image(slug, recipe.image)
+              {:ok, slug, deep_link(ref)}
+
+            {:error, %Error{} = error} ->
               # Roll back the orphaned draft
-              delete_recipe(slug)
-              {:error, class, reason}
+              _ = impl().delete_recipe(slug)
+              {:error, error}
           end
 
-        {:error, class, reason} ->
-          {:error, class, reason}
+        {:error, %Error{} = error} ->
+          {:error, error}
       end
-    end
-  end
-
-  def classify_response(%{status: st, body: body}) do
-    case InstaMealie.HttpClassify.classify(st) do
-      :ok ->
-        {:ok, body}
-
-      {:error, class, reason} ->
-        {:error, class, format_error_reason(reason, body)}
     end
   end
 
   # ── Private helpers ────────────────────────────────────────────────
 
-  @spec create_recipe(Recipe.t()) :: {:ok, String.t()} | {:error, atom(), term()}
-  defp create_recipe(%Recipe{name: name}) do
-    name = name || "Untitled recipe"
-
-    case request(:post, "/api/recipes", %{name: name}) do
-      {:ok, body} when is_map(body) ->
-        Logger.info("[mealie] POST /api/recipes -> ok (slug=#{body["slug"] || body["id"]})")
-        {:ok, body["slug"] || body["id"]}
-
-      {:ok, slug} when is_binary(slug) ->
-        Logger.info("[mealie] POST /api/recipes -> ok (slug=#{slug})")
-        {:ok, slug}
-
-      {:ok, other} ->
-        Logger.warning("[mealie] POST /api/recipes returned unexpected response shape")
-        {:error, :api_error, "unexpected create response: #{inspect(other)}"}
-
-      {:error, class, reason} ->
-        Logger.error("[mealie] POST /api/recipes failed (#{class}: #{reason})")
-        {:error, class, reason}
-    end
-  end
-
-  @spec update_recipe(String.t(), Recipe.t()) :: {:ok, String.t()} | {:error, atom(), term()}
-  defp update_recipe(slug, %Recipe{} = recipe) when is_binary(slug) do
-    payload = Recipe.to_mealie_payload(recipe)
-
-    Logger.debug("[mealie] PATCH /api/recipes/#{slug} payload keys: #{inspect(Map.keys(payload))}")
-
-    case request(:patch, "/api/recipes/#{slug}", payload) do
-      {:ok, _} ->
-        _ = upload_image_if_present(slug, recipe)
-        Logger.info("[mealie] PATCH /api/recipes/#{slug} -> ok")
-        {:ok, slug}
-
-      {:error, class, reason} ->
-        Logger.error("[mealie] PATCH /api/recipes/#{slug} failed (#{class}: #{reason})")
-        {:error, class, reason}
-    end
-  end
-
-  defp delete_recipe(slug) when is_binary(slug) do
-    case request(:delete, "/api/recipes/#{slug}") do
-      {:ok, _} ->
-        Logger.info("[mealie] DELETE /api/recipes/#{slug} -> ok")
-        :ok
-
-      {:error, class, reason} ->
-        Logger.error("[mealie] DELETE /api/recipes/#{slug} failed (#{class}: #{reason})")
-        {:error, class, reason}
-    end
-  end
-
-  @spec format_error_reason(String.t(), term()) :: String.t()
-  defp format_error_reason(reason, body) when body in [nil, %{}, []], do: reason
-
-  defp format_error_reason(reason, body) do
-    truncated = inspect(body, limit: 500, printable_limit: 300)
-    "#{reason}: #{truncated}"
-  end
-
   defp search_collection(type, term) do
-    path = "/api/#{type}?perPage=25&search=#{URI.encode_www_form(term)}"
-
-    case request(:get, path) do
-      {:ok, body} ->
-        results =
-          if Map.has_key?(body, "items"),
-            do: body["items"],
-            else: Map.get(body, "data", [])
-
+    case impl().search(type, term) do
+      {:ok, results} ->
         Logger.info("[mealie] GET /api/#{type} -> ok (results=#{length(results)})")
         {:ok, results}
 
-      {:error, class, reason} ->
-        Logger.error("[mealie] GET /api/#{type} failed (#{class}: #{reason})")
-        {:error, class, reason}
+      {:error, %Error{} = error} ->
+        Logger.error("[mealie] GET /api/#{type} failed (#{error.class}: #{error.summary})")
+        {:error, error}
     end
   end
-
-  # ---- image ----
-
-  defp upload_image_if_present(slug, %Recipe{image: image}) do
-    case image do
-      nil ->
-        :ok
-
-      url when is_binary(url) ->
-        if String.starts_with?(url, "http://") or String.starts_with?(url, "https://") do
-          case request(:post, "/api/recipes/#{slug}/image", %{url: url}) do
-            {:ok, _} ->
-              Logger.info("[mealie] POST /api/recipes/#{slug}/image (url) -> ok")
-              :ok
-
-            {:error, class, reason} ->
-              Logger.error(
-                "[mealie] POST /api/recipes/#{slug}/image (url) failed (#{class}: #{reason})"
-              )
-
-              :ok
-          end
-        else
-          if File.exists?(url) do
-            upload_image_file(slug, url)
-          else
-            :ok
-          end
-        end
-    end
-  end
-
-  defp upload_image_file(slug, path) do
-    url = base_url() <> "/api/recipes/#{slug}/image"
-
-    try do
-      resp =
-        Req.put!(url,
-          headers: auth_headers(),
-          form: [
-            image: {:file, path},
-            extension: Path.extname(path) |> String.trim_leading(".")
-          ]
-        )
-
-      Logger.debug("[mealie] PUT /api/recipes/#{slug}/image (file) status=#{resp.status}")
-
-      case classify_response(resp) do
-        {:ok, _} -> {:ok, resp.status}
-
-        {:error, class, reason} ->
-          Logger.error(
-            "[mealie] PUT /api/recipes/#{slug}/image (file) failed (#{class}: #{reason})"
-          )
-
-          :ok
-      end
-    rescue
-      _e -> :ok
-    end
-  end
-
-  # ---- http ----
-
-  defp request(method, path, body \\ nil) do
-    adapter = Application.get_env(:insta_mealie, :mealie_http_adapter, &default_mealie_req/3)
-
-    adapter.(method, path, body)
-  end
-
-  defp default_mealie_req(method, path, body) do
-    cfg = mealie_config()
-    url = (cfg[:base_url] || "http://localhost:9000") <> path
-
-    req_args = [method: method, url: url, headers: auth_headers()]
-
-    req =
-      if(body, do: Keyword.put(req_args, :json, body), else: req_args)
-      |> Req.new()
-
-    start = System.monotonic_time(:millisecond)
-
-    try do
-      resp = Req.request!(req)
-      elapsed = System.monotonic_time(:millisecond) - start
-
-      Logger.debug(
-        "[mealie] #{method |> to_string() |> String.upcase()} #{path} status=#{resp.status} #{elapsed}ms"
-      )
-
-      classify_response(resp)
-    rescue
-      e -> {:error, :network, Exception.message(e)}
-    end
-  end
-
-  defp auth_headers do
-    token = mealie_config()[:api_token] || ""
-    [{"Authorization", "Bearer #{token}"}]
-  end
-
-  defp base_url, do: mealie_config()[:base_url] || "http://localhost:9000"
-
-  defp mealie_config, do: Application.get_env(:insta_mealie, :mealie, [])
 
   defp extract_confidence(item, food) do
     conf = Map.get(item, "confidence")

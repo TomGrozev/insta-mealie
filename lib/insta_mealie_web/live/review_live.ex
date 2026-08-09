@@ -29,8 +29,8 @@ defmodule InstaMealieWeb.ReviewLive do
               {fc, uc, sf, su, ft, ut} = acc
               i = ing.index
 
-              food_term = ing.food || ing.raw || ""
-              unit_term = ing.unit || ""
+              food_term = ing.food.name || ing.raw || ""
+              unit_term = ing.unit.name || ""
 
               food_cands = source_food_suggestions(food_term)
               unit_cands = source_unit_suggestions(unit_term)
@@ -250,8 +250,6 @@ defmodule InstaMealieWeb.ReviewLive do
     parse_index_value(params["index"] || get_in(params, ["review", "index"]))
   end
 
-  defp resolve_explicit_index(_), do: :error
-
   defp resolve_field_key_index(params, field) when is_binary(field) do
     prefix = "#{field}_"
     nested = get_in(params, ["review"]) || %{}
@@ -281,8 +279,6 @@ defmodule InstaMealieWeb.ReviewLive do
     target = params["_target"] || get_in(params, ["review", "_target"])
     parse_target(target)
   end
-
-  defp resolve_target_index(_), do: :error
 
   defp parse_target(target) when is_binary(target) do
     target
@@ -450,8 +446,8 @@ defmodule InstaMealieWeb.ReviewLive do
                                 , {parts.note}
                               </span>
                             <% end %>
-                            <span class={confidence_badge(ing.food_confidence)}>
-                              {confidence_percent_label(ing.food_confidence)}
+                            <span class={confidence_badge(ing.food.confidence)}>
+                              {confidence_percent_label(ing.food.confidence)}
                             </span>
                           </div>
                         </div>
@@ -474,8 +470,8 @@ defmodule InstaMealieWeb.ReviewLive do
                                 {ing.raw}
                               </p>
                             </div>
-                            <span class={confidence_badge(ing.food_confidence)}>
-                              {confidence_label(ing.food_confidence)}
+                            <span class={confidence_badge(ing.food.confidence)}>
+                              {confidence_label(ing.food.confidence)}
                             </span>
                           </div>
                         </div>
@@ -878,15 +874,15 @@ defmodule InstaMealieWeb.ReviewLive do
 
   defp initial_food_value(ing, cands) do
     cond do
-      ing.food && ing.food in cands -> ing.food
-      true -> ing.food || ing.raw || ""
+      ing.food.name && ing.food.name in cands -> ing.food.name
+      true -> ing.food.name || ing.raw || ""
     end
   end
 
   defp initial_unit_value(ing, cands) do
     cond do
-      ing.unit && ing.unit in cands -> ing.unit
-      true -> ing.unit || ""
+      ing.unit.name && ing.unit.name in cands -> ing.unit.name
+      true -> ing.unit.name || ""
     end
   end
 
@@ -942,8 +938,8 @@ defmodule InstaMealieWeb.ReviewLive do
   defp confidence_label(c) when c >= 0.5, do: "Medium"
   defp confidence_label(_), do: "Low"
 
-  defp initial_food(ing), do: ing.food || ing.raw || ""
-  defp initial_unit(ing), do: ing.unit || ""
+  defp initial_food(ing), do: ing.food.name || ing.raw || ""
+  defp initial_unit(ing), do: ing.unit.name || ""
 
   defp confidence_percent_label(nil), do: "Unknown confidence"
   defp confidence_percent_label(c) when c >= 1.0, do: "100% confidence"

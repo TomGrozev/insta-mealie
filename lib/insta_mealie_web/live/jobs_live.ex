@@ -112,7 +112,7 @@ defmodule InstaMealieWeb.JobsLive do
             From reel to recipe.
           </h1>
           <p class="max-w-xl text-base-content/70">
-            Paste an Instagram reel and InstaMealie pulls the recipe out of the video — then sends it to Mealie.
+            Paste an Instagram reel URL and InstaMealie pulls the recipe out of it — then sends it to Mealie.
           </p>
         </div>
 

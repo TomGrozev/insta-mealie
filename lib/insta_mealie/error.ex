@@ -1,7 +1,6 @@
 defmodule InstaMealie.Error do
   @moduledoc """
   Structured error type used by all external clients and the pipeline.
-  Replaces ad-hoc `{:error, class, reason}` tuples.
   """
 
   defstruct [:class, :summary, :stage, :operation, :detail]
@@ -31,20 +30,6 @@ defmodule InstaMealie.Error do
       detail: Keyword.get(opts, :detail)
     }
   end
-
-  @doc """
-  Convert the legacy `{:error, class, reason}` tuple form into the structured
-  error type wrapped in an `{:error, error}` tuple. Pass-through for any other
-  value so callers can pipe a result through without first pattern-matching.
-
-  Used during the expand phase of the migration in #45. Will be removed once
-  every client returns the structured type directly.
-  """
-  def from_tuple({:error, class, reason}) when is_atom(class) do
-    {:error, InstaMealie.Error.new(class, reason)}
-  end
-
-  def from_tuple(other), do: other
 
   @doc """
   Whether this error class is retryable.

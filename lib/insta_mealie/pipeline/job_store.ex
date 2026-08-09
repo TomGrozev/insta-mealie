@@ -1,180 +1,74 @@
 defmodule InstaMealie.Pipeline.JobStore do
-  @moduledoc "SQLite-backed job persistence with TTL sweep and row cap."
+  @moduledoc "ETS-backed job persistence with rolling TTL and a row cap."
+  @table :insta_mealie_jobs
 
-  @db_key :insta_mealie_jobstore_db
-  @table "jobs"
-
-  defp db_path do
-    Application.get_env(:insta_mealie, :insta_mealie, [])[:db_path] ||
-      System.get_env("INSTA_MEALIE_DB_PATH") ||
-      "/tmp/insta_mealie_jobs.db"
+  @doc "Create the ETS table. Safe to call once at boot."
+  def create_table do
+    if :ets.info(@table) == :undefined do
+      :ets.new(
+        @table,
+        [:set, :public, :named_table, {:read_concurrency, true}, {:write_concurrency, true}]
+      )
+    else
+      @table
+    end
   end
 
-  @doc "Open DB and create schema. Called once at boot by Sweeper."
-  def init_db do
-    path = db_path()
-    path |> Path.dirname() |> File.mkdir_p!()
-
-    {:ok, db} = Exqlite.Sqlite3.open(path)
-    Exqlite.Sqlite3.execute(db, "PRAGMA journal_mode=WAL")
-    Exqlite.Sqlite3.execute(db, "PRAGMA busy_timeout=5000")
-
-    Exqlite.Sqlite3.execute(db, """
-      CREATE TABLE IF NOT EXISTS #{@table} (
-        id TEXT PRIMARY KEY,
-        data BLOB NOT NULL,
-        state TEXT NOT NULL DEFAULT 'created',
-        inserted_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL
-      )
-    """)
-
-    Exqlite.Sqlite3.execute(db, "CREATE INDEX IF NOT EXISTS idx_jobs_inserted ON #{@table}(inserted_at DESC)")
-    Exqlite.Sqlite3.execute(db, "CREATE INDEX IF NOT EXISTS idx_jobs_expires ON #{@table}(expires_at)")
-
-    # Mark in-flight jobs as interrupted on recovery
-    Exqlite.Sqlite3.execute(db, """
-      UPDATE #{@table} SET state = 'interrupted'
-      WHERE state IN ('created', 'running', 'caption_pasting', 'needs_review')
-    """)
-
-    :persistent_term.put(@db_key, db)
+  @doc "Persist a job snapshot. Enforces the row cap."
+  def put(job) do
+    now_ms = System.system_time(:millisecond)
+    expires_at = now_ms + ttl_ms()
+    :ets.insert(@table, {job.id, job, expires_at, now_ms})
+    enforce_cap()
     :ok
   end
 
-  def put(job) do
-    case get_db() do
-      {:error, _} = err ->
-        err
-
-      {:ok, db} ->
-        now_ms = System.system_time(:millisecond)
-        expires_at = now_ms + ttl_ms()
-        data = :erlang.term_to_binary(job)
-        state = Atom.to_string(job.state)
-        ins_epoch = to_epoch_ms(job.inserted_at)
-
-        run_write(
-          db,
-          """
-          INSERT OR REPLACE INTO #{@table} (id, data, state, inserted_at, updated_at, expires_at)
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-          """,
-          [job.id, data, state, ins_epoch, now_ms, expires_at]
-        )
-
-        enforce_cap(db)
-        :ok
-    end
-  end
-
+  @doc "Read a job snapshot by id."
   def get(id) do
-    with {:ok, db} <- get_db(),
-         {:ok, rows} <-
-           run_read(db, "SELECT state, data FROM #{@table} WHERE id = ?1", [id]) do
-      case rows do
-        [[state, data]] when is_binary(data) ->
-          job = :erlang.binary_to_term(data)
-          # The `state` column is authoritative (it backs the interrupted-state
-          # recovery update in init_db/0, which mutates the column but not the
-          # cached BLOB). Override the struct's state with the column's value.
-          state_atom = if is_binary(state), do: String.to_existing_atom(state), else: state
-          %{job | state: state_atom}
-
-        _ ->
-          nil
-      end
+    case :ets.lookup(@table, id) do
+      [{^id, job, _, _}] -> job
+      [] -> nil
     end
   end
 
+  @doc "List jobs newest-first by inserted_at."
   def list do
-    with {:ok, db} <- get_db(),
-         {:ok, rows} <-
-           run_read(
-             db,
-             "SELECT state, data FROM #{@table} ORDER BY inserted_at DESC LIMIT ?1",
-             [cap()]
-           ) do
-      Enum.map(rows, fn [state, data] ->
-        job = :erlang.binary_to_term(data)
-        state_atom = if is_binary(state), do: String.to_existing_atom(state), else: state
-        %{job | state: state_atom}
-      end)
-    end
+    :ets.tab2list(@table)
+    |> Enum.map(fn {_id, job, _exp, _upd} -> job end)
+    |> Enum.sort_by(& &1.inserted_at, {:desc, DateTime})
   end
 
-  def delete(id) do
-    with {:ok, db} <- get_db() do
-      run_write(db, "DELETE FROM #{@table} WHERE id = ?1", [id])
-      :ok
-    end
-  end
+  @doc "Delete a single job."
+  def delete(id), do: :ets.delete(@table, id)
 
-  def clear do
-    with {:ok, db} <- get_db() do
-      run_write(db, "DELETE FROM #{@table}", [])
-      :ok
-    end
-  end
+  @doc false
+  def clear, do: :ets.delete_all_objects(@table)
 
+  @doc "Delete expired rows and trim to the cap. Called by the Sweeper."
   def sweep do
-    with {:ok, db} <- get_db() do
-      now_ms = System.system_time(:millisecond)
-      run_write(db, "DELETE FROM #{@table} WHERE expires_at < ?1", [now_ms])
-      enforce_cap(db)
-      :ok
-    end
+    now_ms = System.system_time(:millisecond)
+    :ets.select_delete(@table, [{{:_, :_, :"$1", :_}, [{:<, :"$1", now_ms}], [true]}])
+    enforce_cap()
+    :ok
   end
 
-  # -- private --
+  @doc false
+  def enforce_cap, do: enforce_cap(cap())
 
-  defp get_db do
-    case :persistent_term.get(@db_key, nil) do
-      nil -> {:error, :db_not_initialized}
-      db -> {:ok, db}
-    end
-  end
+  def enforce_cap(cap) when is_integer(cap) do
+    size = :ets.info(@table, :size)
 
-  defp run_write(db, sql, args) do
-    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
-         :ok <- Exqlite.Sqlite3.bind(stmt, args) do
-      try do
-        case Exqlite.Sqlite3.multi_step(db, stmt) do
-          {:done, _rows} -> :ok
-          {:rows, _rows} -> :ok
-          {:error, reason} -> {:error, reason}
-          :busy -> {:error, :busy}
-        end
-      after
-        Exqlite.Sqlite3.release(db, stmt)
-      end
-    end
-  end
+    if size > cap do
+      excess = size - cap
 
-  defp run_read(db, sql, args) do
-    with {:ok, stmt} <- Exqlite.Sqlite3.prepare(db, sql),
-         :ok <- Exqlite.Sqlite3.bind(stmt, args) do
-      try do
-        case Exqlite.Sqlite3.fetch_all(db, stmt) do
-          {:ok, rows} -> {:ok, rows}
-          {:error, reason} -> {:error, reason}
-        end
-      after
-        Exqlite.Sqlite3.release(db, stmt)
-      end
+      @table
+      |> :ets.tab2list()
+      |> Enum.sort_by(fn {_id, _job, _exp, updated} -> updated end)
+      |> Enum.take(excess)
+      |> Enum.each(fn {id, _job, _exp, _upd} -> :ets.delete(@table, id) end)
     end
-  end
 
-  defp enforce_cap(db) do
-    with {:ok, [[count]]} <- run_read(db, "SELECT COUNT(*) FROM #{@table}", []),
-         cap = cap(),
-         true <- count > cap do
-      excess = count - cap
-      run_write(db, "DELETE FROM #{@table} WHERE id IN (SELECT id FROM #{@table} ORDER BY updated_at ASC LIMIT ?1)", [excess])
-    else
-      _ -> :ok
-    end
+    :ok
   end
 
   defp ttl_ms do
@@ -184,7 +78,4 @@ defmodule InstaMealie.Pipeline.JobStore do
   defp cap do
     Application.get_env(:insta_mealie, InstaMealie.Pipeline, [])[:cap] || 500
   end
-
-  defp to_epoch_ms(nil), do: System.system_time(:millisecond)
-  defp to_epoch_ms(%DateTime{} = dt), do: DateTime.to_unix(dt, :millisecond)
 end

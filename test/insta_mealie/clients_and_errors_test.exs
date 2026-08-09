@@ -1,25 +1,26 @@
 defmodule InstaMealie.ClientsAndErrorsTest do
   use InstaMealie.TestCase
 
+  alias InstaMealie.Error
   alias InstaMealie.Pipeline
 
   describe "error_retryable?/1" do
     test "validation is a dead row" do
-      refute Pipeline.error_retryable?(:validation)
+      refute Pipeline.error_retryable?(%Error{class: :validation})
     end
 
     test "network is retryable, auth is a dead row" do
-      assert Pipeline.error_retryable?(:network)
-      refute Pipeline.error_retryable?(:auth)
+      assert Pipeline.error_retryable?(%Error{class: :network})
+      refute Pipeline.error_retryable?(%Error{class: :auth})
     end
 
     test "other transient classes are retryable; unknowns are not" do
-      assert Pipeline.error_retryable?(:timeout)
-      assert Pipeline.error_retryable?(:rate_limited)
-      assert Pipeline.error_retryable?(:ip_banned)
-      assert Pipeline.error_retryable?(:cookie_expired)
-      assert Pipeline.error_retryable?(:api_error)
-      refute Pipeline.error_retryable?(:something_else)
+      assert Pipeline.error_retryable?(%Error{class: :timeout})
+      assert Pipeline.error_retryable?(%Error{class: :rate_limited})
+      assert Pipeline.error_retryable?(%Error{class: :ip_banned})
+      assert Pipeline.error_retryable?(%Error{class: :cookie_expired})
+      assert Pipeline.error_retryable?(%Error{class: :api_error})
+      refute Pipeline.error_retryable?(%Error{class: :something_else})
     end
   end
 

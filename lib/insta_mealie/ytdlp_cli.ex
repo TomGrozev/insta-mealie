@@ -25,6 +25,7 @@ defmodule InstaMealie.YtDlp.Cli do
   @behaviour InstaMealie.YtDlp
 
   require Logger
+  alias InstaMealie.Error
 
   @min_version {2026, 7, 4}
   @preflight_key :insta_mealie_ytdlp_preflight
@@ -35,7 +36,7 @@ defmodule InstaMealie.YtDlp.Cli do
   def fetch_metadata(url, opts \\ []) when is_binary(url) do
     case System.find_executable("yt-dlp") do
       nil ->
-        {:error, :extraction, "yt-dlp binary not found on PATH"}
+        {:error, Error.new(:extraction, "yt-dlp binary not found on PATH")}
 
       ytdlp ->
         host = url |> URI.parse() |> Map.get(:host, "unknown")
@@ -54,11 +55,11 @@ defmodule InstaMealie.YtDlp.Cli do
             elapsed = System.monotonic_time(:millisecond) - start
             class = classify_fetch_error(stderr)
             Logger.error("[ytdlp] metadata #{host} failed in #{elapsed}ms (#{class})")
-            {:error, class, sanitize(stderr)}
+            {:error, Error.new(class, sanitize(stderr))}
         end
     end
   rescue
-    e in RuntimeError -> {:error, :extraction, Exception.message(e)}
+    e in RuntimeError -> {:error, Error.new(:extraction, Exception.message(e))}
   end
 
   # ---- fetch_audio ----
@@ -67,7 +68,7 @@ defmodule InstaMealie.YtDlp.Cli do
   def fetch_audio(url, opts \\ []) when is_binary(url) do
     case System.find_executable("yt-dlp") do
       nil ->
-        {:error, :extraction, "yt-dlp binary not found on PATH"}
+        {:error, Error.new(:extraction, "yt-dlp binary not found on PATH")}
 
       ytdlp ->
         host = url |> URI.parse() |> Map.get(:host, "unknown")
@@ -86,11 +87,11 @@ defmodule InstaMealie.YtDlp.Cli do
             elapsed = System.monotonic_time(:millisecond) - start
             class = classify_fetch_error(stderr)
             Logger.error("[ytdlp] audio #{host} failed in #{elapsed}ms (#{class})")
-            {:error, class, sanitize(stderr)}
+            {:error, Error.new(class, sanitize(stderr))}
         end
     end
   rescue
-    e in RuntimeError -> {:error, :extraction, Exception.message(e)}
+    e in RuntimeError -> {:error, Error.new(:extraction, Exception.message(e))}
   end
 
   # ---- preflight ----

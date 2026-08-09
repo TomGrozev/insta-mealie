@@ -1,10 +1,13 @@
 defmodule InstaMealie.HttpClassify do
-  @moduledoc "Normalise an HTTP status into {:ok, :success} | {:error, class, reason}."
+  @moduledoc "Normalise an HTTP status into :ok | %InstaMealie.Error{}."
+
+  alias InstaMealie.Error
+
   def classify(status) when status in 200..299, do: :ok
-  def classify(401), do: {:error, :auth, "unauthorized"}
-  def classify(403), do: {:error, :auth, "forbidden"}
-  def classify(422), do: {:error, :validation, "validation failed"}
-  def classify(429), do: {:error, :rate_limited, "rate limited"}
-  def classify(s) when s in 400..499, do: {:error, :api_error, "client error #{s}"}
-  def classify(s) when s >= 500, do: {:error, :network, "server error #{s}"}
+  def classify(401), do: Error.new(:auth, "unauthorized")
+  def classify(403), do: Error.new(:auth, "forbidden")
+  def classify(422), do: Error.new(:validation, "validation failed")
+  def classify(429), do: Error.new(:rate_limited, "rate limited")
+  def classify(s) when s in 400..499, do: Error.new(:api_error, "client error #{s}")
+  def classify(s) when s >= 500, do: Error.new(:network, "server error #{s}")
 end

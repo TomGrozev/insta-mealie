@@ -1,39 +1,47 @@
+defmodule InstaMealie.LLM.Envelope do
+  @moduledoc """
+  The LLM recipe verdict envelope.
+
+  Carried through the pipeline as the output of `LLM.format/2` and `LLM.merge/3`.
+  """
+  defstruct [:recipe, :completeness, :missing_fields]
+end
+
 defmodule InstaMealie.LLM do
   @moduledoc """
   Single LLM module for routing/format/merge calls.
 
-  The envelope returned by both calls is:
-  `%{completeness: :recipe_complete | :recipe_partial | :no_recipe,
-      missing_fields: list(),
-      recipe: map()}`
+  Both calls return `{:ok, %InstaMealie.LLM.Envelope{}}` with fields:
+  `completeness` (`:recipe_complete` | `:recipe_partial` | `:no_recipe`),
+  `missing_fields` (list of atoms), and `recipe` (a `%Recipe{}` struct or empty map).
 
   ## Routing verdict contract
 
   A single routing call (Prompt 1) returns the verdict plus a (possibly
   partial) recipe. `missing_fields` is limited to the vocabulary
   `[:recipeIngredient, :recipeInstructions]` — anything else is dropped by
-  `normalize_envelope/1`.
+  `envelope_from_json/1`.
 
   The guard against a *spurious* `recipe_complete` verdict lives in the
-  prompt, **not** in the interpreter. The FSM therefore trusts the 
-  verdict flatly: `recipe_complete` skips transcription, while 
+  prompt, **not** in the interpreter. The FSM therefore trusts the
+  verdict flatly: `recipe_complete` skips transcription, while
   `recipe_partial` AND `no_recipe` both fire transcription + merge.
-  `no_recipe` must never cause a fabricated recipe name — that 
-  invariant is the prompt's responsibility; the interpreter only 
+  `no_recipe` must never cause a fabricated recipe name — that
+  invariant is the prompt's responsibility; the interpreter only
   forwards what it is given.
   """
   require Logger
 
+  alias InstaMealie.Error
+  alias InstaMealie.LLM.Envelope
   alias InstaMealie.Recipe
 
   @type completeness :: :recipe_complete | :recipe_partial | :no_recipe
-  @type envelope :: %{
-          completeness: completeness,
+  @type envelope :: %Envelope{
+          completeness: completeness(),
           missing_fields: list(),
           recipe: Recipe.t()
         }
-
-  @allowed_missing_fields [:recipeIngredient, :recipeInstructions]
 
   # ── Few-shot examples ──────────────────────────────────────────────
 
@@ -65,7 +73,7 @@ defmodule InstaMealie.LLM do
 
   # ── Public API ─────────────────────────────────────────────────────
 
-  @spec format(String.t(), keyword()) :: {:ok, envelope} | {:error, atom(), term()}
+  @spec format(String.t(), keyword()) :: {:ok, envelope} | {:error, Error.t()}
   def format(caption, opts \\ []) do
     output_language = Keyword.get(opts, :output_language, "en")
     comments = Keyword.get(opts, :comments, [])
@@ -79,7 +87,7 @@ defmodule InstaMealie.LLM do
     request_llm(:format, model, messages)
   end
 
-  @spec merge(String.t(), String.t(), keyword()) :: {:ok, envelope} | {:error, atom(), term()}
+  @spec merge(String.t(), String.t(), keyword()) :: {:ok, envelope} | {:error, Error.t()}
   def merge(caption, transcript, opts \\ []) do
     output_language = Keyword.get(opts, :output_language, "en")
     draft = Keyword.get(opts, :draft)
@@ -96,11 +104,11 @@ defmodule InstaMealie.LLM do
   # ── LLM request helper ────────────────────────────────────────────
 
   defp request_llm(op, model, messages) do
-    adapter = Application.get_env(:insta_mealie, :llm_http_adapter, &default_llm_req/2)
+    adapter = Application.get_env(:insta_mealie, InstaMealie.LLM, InstaMealie.LLM.Http)
     model = model || "unknown"
     start = System.monotonic_time(:millisecond)
 
-    result = adapter.(model, messages)
+    result = adapter.chat(model, messages)
     elapsed = System.monotonic_time(:millisecond) - start
 
     with {:ok, resp} <- result,
@@ -113,9 +121,6 @@ defmodule InstaMealie.LLM do
     else
       {:error, reason} ->
         llm_error(:api_error, reason, op, elapsed, model)
-
-      {:error, class, reason} ->
-        llm_error(class, reason, op, elapsed, model)
     end
   end
 
@@ -124,46 +129,7 @@ defmodule InstaMealie.LLM do
       "[llm] #{op} failed in #{elapsed}ms (model=#{model}, class=#{class}, reason=#{reason})"
     )
 
-    {:error, class, reason}
-  end
-
-  defp default_llm_req(model, messages) do
-    cfg = config()
-
-    uri =
-      (cfg[:base_url] || "https://api.openai.com/v1")
-      |> URI.parse()
-      |> URI.append_path("/chat/completions")
-
-    request_body = %{
-      response_format: %{type: "json_object"},
-      temperature: 0,
-      model: model,
-      messages: messages
-    }
-
-    req =
-      Req.new(
-        url: uri,
-        method: :post,
-        headers: [
-          {"authorization", "Bearer #{cfg[:api_key] || ""}"},
-          {"content-type", "application/json"}
-        ],
-        json: request_body,
-        receive_timeout: 180_000
-      )
-
-    try do
-      resp = Req.request!(req)
-      Logger.debug("[llm] POST #{uri} status=#{resp.status}")
-
-      with :ok <- InstaMealie.HttpClassify.classify(resp.status) do
-        {:ok, resp.body}
-      end
-    rescue
-      e -> {:error, :network, Exception.message(e)}
-    end
+    {:error, Error.new(class, reason)}
   end
 
   # ── Content parser ─────────────────────────────────────────────────
@@ -193,7 +159,8 @@ defmodule InstaMealie.LLM do
 
   # ── Pure envelope parser (Step 2) ─────────────────────────────────
 
-  defp envelope_from_json(json) when is_map(json) do
+  @doc "Construct an envelope from a parsed JSON map returned by the LLM."
+  def envelope_from_json(json) when is_map(json) do
     completeness = parse_completeness(json["completeness"])
     missing_fields = parse_missing_fields(json["missing_fields"])
 
@@ -202,7 +169,7 @@ defmodule InstaMealie.LLM do
       |> normalize_durations()
       |> Recipe.from_map()
 
-    %{completeness: completeness, missing_fields: missing_fields, recipe: recipe}
+    %Envelope{completeness: completeness, missing_fields: missing_fields, recipe: recipe}
   end
 
   # ── Completeness whitelist ─────────────────────────────────────────
@@ -482,57 +449,6 @@ defmodule InstaMealie.LLM do
        [%{role: "user", content: user_content}])
     |> List.flatten()
   end
-
-  # ── Coerce and sanitize an envelope returned by an adapter ─────────
-
-  def normalize_envelope(%{
-        completeness: completeness,
-        missing_fields: missing_fields,
-        recipe: recipe
-      }) do
-    %{
-      completeness: to_completeness(completeness),
-      missing_fields: to_missing_fields(missing_fields),
-      recipe: recipe_or_default(recipe)
-    }
-  end
-
-  def normalize_envelope(other) when is_map(other) do
-    completeness = Map.get(other, :completeness) || Map.get(other, "completeness")
-    missing_fields = Map.get(other, :missing_fields) || Map.get(other, "missing_fields") || []
-    recipe = Map.get(other, :recipe) || Map.get(other, "recipe")
-
-    %{
-      completeness: to_completeness(completeness),
-      missing_fields: to_missing_fields(missing_fields),
-      recipe: recipe_or_default(recipe)
-    }
-  end
-
-  defp to_completeness(:recipe_complete), do: :recipe_complete
-  defp to_completeness("recipe_complete"), do: :recipe_complete
-  defp to_completeness(:recipe_partial), do: :recipe_partial
-  defp to_completeness("recipe_partial"), do: :recipe_partial
-  defp to_completeness(:no_recipe), do: :no_recipe
-  defp to_completeness("no_recipe"), do: :no_recipe
-
-  defp to_completeness(_other), do: :unknown
-
-  defp to_missing_fields(list) when is_list(list) do
-    list
-    |> Enum.flat_map(fn
-      field when field in @allowed_missing_fields -> [field]
-      "recipeIngredient" -> [:recipeIngredient]
-      "recipeInstructions" -> [:recipeInstructions]
-      _ -> []
-    end)
-    |> Enum.uniq()
-  end
-
-  defp to_missing_fields(_), do: []
-
-  defp recipe_or_default(recipe) when is_map(recipe), do: recipe
-  defp recipe_or_default(_), do: Recipe.empty()
 
   # ── Config ────────────────────────────────────────────────────────
 

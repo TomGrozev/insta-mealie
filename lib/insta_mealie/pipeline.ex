@@ -15,6 +15,7 @@ defmodule InstaMealie.Pipeline do
 
   require Logger
 
+  alias InstaMealie.Error
   alias InstaMealie.Pipeline.{Job, JobAdmission, JobStore, JobSupervisor, Sweeper}
   alias InstaMealie.PubSub
   alias InstaMealie.Recipe
@@ -110,29 +111,8 @@ defmodule InstaMealie.Pipeline do
   Whether a pipeline error represents a retryable failure (vs. a dead
   row). `validation` is terminal; `network` / `auth` and the other transient
   classes are retryable. Consumed by the retry UI (later ticket).
-
-  Accepts either a bare class atom (legacy contract) or an
-  `InstaMealie.Error` struct (post-#45 contract) — retryability is the same
-  for both, so the struct form delegates to the bare-atom predicates below.
   """
-  def error_retryable?(%InstaMealie.Error{} = error), do: error_retryable?(error.class)
-
-  def error_retryable?(class)
-      when class in [
-             :network,
-             :timeout,
-             :rate_limited,
-             :ip_banned,
-             :cookie_expired,
-             :api_error
-           ],
-      do: true
-
-  def error_retryable?(:auth), do: false
-  def error_retryable?(:validation), do: false
-  def error_retryable?(:incomplete_caption), do: false
-  def error_retryable?(:cancelled), do: false
-  def error_retryable?(_), do: false
+  def error_retryable?(%Error{} = error), do: Error.retryable?(error)
 
   @doc """
   Retry a job from the start, preserving its `job_id`. Each retry is counted
@@ -212,7 +192,7 @@ defmodule InstaMealie.Pipeline do
   Thin facade: forwards to the job's GenServer, which owns the recipe merge
   and the import. No other process mutates the recipe or calls the importer.
   Returns the import result directly: `{:ok, updated_job}` on success or
-  `{:error, class, reason}` on failure.
+  `{:error, %Error{}}` on failure.
   """
   def apply_ingredient_resolutions(job_id, resolutions) when is_binary(job_id) do
     case JobStore.get(job_id) do
@@ -233,7 +213,7 @@ defmodule InstaMealie.Pipeline do
 
       %{state: :queued} = job ->
         JobAdmission.cancel(job_id)
-        job = transition(job, [{:state, :cancelled}])
+        transition(job, [{:state, :cancelled}])
         {:ok, job_id}
 
       %{state: state} = _job when state in [:succeeded, :failed, :cancelled] ->
@@ -288,7 +268,7 @@ defmodule InstaMealie.Pipeline do
     * `{:missing_fields, list | nil}` — set missing_fields
     * `{:slug, binary | nil}` — set slug
     * `{:deep_link, binary | nil}` — set deep_link
-    * `{:error, stage, class, reason}` — set error_stage/class/summary
+    * `{:error, %Error{}}` — set error_stage/class/summary from the struct
     * `{:clear_error}` — clear all error fields
     * `{:retry_count, map}` — set retry_count
     * `{:caption, binary}` — set caption
@@ -431,19 +411,21 @@ defmodule InstaMealie.Pipeline do
   defp apply_change(job, {:caption, caption}), do: %{job | caption: caption}
   defp apply_change(job, {:mode, mode}), do: %{job | mode: mode}
 
-  defp apply_change(job, {:error, stage, class, reason}) do
-    Logger.error("[pipeline] job #{job.id} failed at #{stage} (#{class}: #{reason})")
+  defp apply_change(job, {:error, %Error{} = error}) do
+    Logger.error(
+      "[pipeline] job #{job.id} failed at #{error.stage} (#{error.class}: #{error.summary})"
+    )
 
     :telemetry.execute(
       [:insta_mealie, :pipeline, :failure],
       %{count: 1},
-      %{job_id: job.id, stage: stage, error_class: class}
+      %{job_id: job.id, stage: error.stage, error_class: error.class}
     )
 
     job
-    |> Map.put(:error_stage, stage)
-    |> Map.put(:error_class, class)
-    |> Map.put(:error_summary, to_string(reason))
+    |> Map.put(:error_stage, error.stage)
+    |> Map.put(:error_class, error.class)
+    |> Map.put(:error_summary, error.summary)
   end
 
   defp apply_change(job, {:clear_error}) do
@@ -468,7 +450,7 @@ defmodule InstaMealie.Pipeline do
   @doc """
   Execute the Mealie import for a job whose recipe is ready, persisting the
   result to ETS and broadcasting the update. Returns `{:ok, updated_job}` on
-  success or `{:error, class, reason}` on failure.
+  success or `{:error, %Error{}}` on failure.
 
   This is the canonical import entrypoint. The GenServer (via
   `InstaMealie.Pipeline.Job.run_import/1`) delegates here after setting the
@@ -477,7 +459,7 @@ defmodule InstaMealie.Pipeline do
   pre-setting the stage. Callers MUST set the stage to `:running` before
   calling; this function sets `:done` on success or `:failed` on error.
   """
-  @spec run_import_inline(Job.t()) :: {:ok, Job.t()} | {:error, atom(), term()}
+  @spec run_import_inline(Job.t()) :: {:ok, Job.t()} | {:error, Error.t()}
   def run_import_inline(job) do
     recipe = job.recipe || Recipe.empty()
 
@@ -494,14 +476,16 @@ defmodule InstaMealie.Pipeline do
 
         {:ok, updated}
 
-      {:error, class, reason} ->
+      {:error, %Error{} = error} ->
+        error = %Error{error | stage: :mealie_import}
+
         transition(job, [
           {:state, :failed},
-          {:error, :mealie_import, class, reason},
+          {:error, error},
           {:stage, :mealie_import, :failed}
         ])
 
-        {:error, class, reason}
+        {:error, error}
     end
   end
 
@@ -530,7 +514,7 @@ defmodule InstaMealie.Pipeline do
         "[pipeline] duplicate URL detected, existing job #{existing.id}"
       )
 
-      {:error, :duplicate_url, existing.id}
+      {:error, Error.new(:duplicate_url, "duplicate URL, existing job #{existing.id}")}
     else
       :ok
     end

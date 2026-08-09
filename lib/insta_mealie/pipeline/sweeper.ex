@@ -1,5 +1,5 @@
 defmodule InstaMealie.Pipeline.Sweeper do
-  @moduledoc "Owns the SQLite job store and runs the periodic TTL sweep."
+  @moduledoc "Owns the ETS job table and runs the periodic TTL sweep."
   use GenServer
 
   alias InstaMealie.Pipeline.JobStore
@@ -8,7 +8,7 @@ defmodule InstaMealie.Pipeline.Sweeper do
 
   @impl true
   def init(:ok) do
-    JobStore.init_db()
+    JobStore.create_table()
 
     interval =
       Application.get_env(:insta_mealie, InstaMealie.Pipeline, [])[:sweep_interval_ms] ||

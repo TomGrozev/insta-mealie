@@ -232,25 +232,31 @@ defmodule InstaMealie.Mealie.RealTest do
     end
 
     test "validation is a dead row" do
-      assert Mealie.classify_response(%{status: 422, body: %{}}) ==
-               {:error, :validation, "validation failed"}
+      {:error, error} = Mealie.classify_response(%{status: 422, body: %{}})
+      assert error.class == :validation
+      assert error.summary == "validation failed"
     end
 
     test "auth errors" do
-      assert Mealie.classify_response(%{status: 401, body: %{}}) ==
-               {:error, :auth, "unauthorized"}
+      {:error, error} = Mealie.classify_response(%{status: 401, body: %{}})
+      assert error.class == :auth
+      assert error.summary == "unauthorized"
 
-      assert Mealie.classify_response(%{status: 403, body: %{}}) == {:error, :auth, "forbidden"}
+      {:error, error} = Mealie.classify_response(%{status: 403, body: %{}})
+      assert error.class == :auth
+      assert error.summary == "forbidden"
     end
 
     test "server errors are network (retryable)" do
-      assert Mealie.classify_response(%{status: 500, body: %{}}) ==
-               {:error, :network, "server error 500"}
+      {:error, error} = Mealie.classify_response(%{status: 500, body: %{}})
+      assert error.class == :network
+      assert error.summary == "server error 500"
     end
 
     test "other 4xx is api_error" do
-      assert Mealie.classify_response(%{status: 404, body: %{}}) ==
-               {:error, :api_error, "client error 404"}
+      {:error, error} = Mealie.classify_response(%{status: 404, body: %{}})
+      assert error.class == :api_error
+      assert error.summary == "client error 404"
     end
 
     test "non-empty error body is retained in the error reason for diagnostics" do
@@ -260,11 +266,10 @@ defmodule InstaMealie.Mealie.RealTest do
         ]
       }
 
-      assert {:error, :api_error, reason} =
-               Mealie.classify_response(%{status: 400, body: body})
+      {:error, error} = Mealie.classify_response(%{status: 400, body: body})
 
-      assert reason =~ "recipeIngredient"
-      assert reason =~ "invalid ingredient"
+      assert error.summary =~ "recipeIngredient"
+      assert error.summary =~ "invalid ingredient"
     end
   end
 
@@ -490,7 +495,10 @@ defmodule InstaMealie.Mealie.RealTest do
                "unit_id" => "unit-cups",
                "food" => "oats",
                "food_id" => "food-oats",
-               "food_confidence" => 0.93,
+               "food_confidence" => nil,
+               "unit_confidence" => nil,
+               "quantity_confidence" => nil,
+               "average_confidence" => 0.93,
                "note" => nil
              }
     end
@@ -525,27 +533,8 @@ defmodule InstaMealie.Mealie.RealTest do
     end
   end
 
-  describe "create_recipe/1 with plain string response" do
-    test "accepts a bare string slug from the adapter" do
-      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
-
-      Application.put_env(:insta_mealie, :mealie_http_adapter, fn _method, _path, _body ->
-        {:ok, "plain-slug"}
-      end)
-
-      on_exit(fn ->
-        case prev do
-          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
-          _ -> Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
-        end
-      end)
-
-      assert Mealie.create_recipe(Recipe.from_map(%{"name" => "Test"})) == {:ok, "plain-slug"}
-    end
-  end
-
-  describe "update_recipe/2" do
-    test "performs GET then PUT, and PUT body contains server id/slug plus caller fields" do
+  describe "import_recipe/2 with a new recipe (POST then PATCH)" do
+    test "drives the idempotency search, create, and patch via the http adapter stub" do
       test_pid = self()
       prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
 
@@ -554,17 +543,16 @@ defmodule InstaMealie.Mealie.RealTest do
 
         case method do
           :get ->
-            {:ok,
-             %{
-               "id" => "draft-id",
-               "slug" => "draft-slug",
-               "name" => "Recipe",
-               "recipeIngredient" => [],
-               "recipeInstructions" => []
-             }}
+            # Idempotency guard: no existing recipe with this name
+            {:ok, %{"items" => []}}
 
-          :put ->
-            {:ok, %{"slug" => "draft-slug"}}
+          :post ->
+            # POST /api/recipes returns a map with a slug — the adapter
+            # normalizes this into a %RecipeRef{}.
+            {:ok, %{"slug" => "plain-slug"}}
+
+          :patch ->
+            {:ok, %{}}
         end
       end)
 
@@ -575,20 +563,53 @@ defmodule InstaMealie.Mealie.RealTest do
         end
       end)
 
-      assert {:ok, "draft-slug"} =
-               Mealie.update_recipe(
-                 "draft-slug",
-                 Recipe.from_map(%{"name" => "Updated Granola"})
-               )
+      recipe = Recipe.from_map(%{"name" => "Test"})
 
-      # Must have done a GET first
-      assert_receive {:adapter_called, :get, "/api/recipes/draft-slug", _}
+      assert {:ok, "plain-slug", deep_link} = Mealie.import_recipe(recipe, nil)
+      assert deep_link =~ "/g/home/r/plain-slug?edit=true"
 
-      # Must have done a PUT with server identity preserved
-      assert_receive {:adapter_called, :put, "/api/recipes/draft-slug", put_body}
-      assert put_body["id"] == "draft-id"
-      assert put_body["slug"] == "draft-slug"
-      assert put_body["name"] == "Updated Granola"
+      # POST /api/recipes with the recipe name
+      assert_receive {:adapter_called, :post, "/api/recipes", post_body}
+      assert post_body == %{name: "Test"}
+
+      # PATCH /api/recipes/plain-slug with the recipe payload
+      assert_receive {:adapter_called, :patch, "/api/recipes/plain-slug", patch_body}
+      assert patch_body["name"] == "Test"
+    end
+  end
+
+  describe "import_recipe/2 with an existing_slug (PATCH only)" do
+    test "performs a single PATCH under the existing slug and returns the deep link" do
+      test_pid = self()
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
+        send(test_pid, {:adapter_called, method, path, body})
+        {:ok, %{}}
+      end)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          _ -> Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+        end
+      end)
+
+      recipe = Recipe.from_map(%{"name" => "Updated Granola"})
+
+      assert {:ok, "draft-slug", deep_link} =
+               Mealie.import_recipe(recipe, "draft-slug")
+
+      assert deep_link =~ "/g/home/r/draft-slug?edit=true"
+
+      # PATCH /api/recipes/draft-slug with the recipe payload (no id/slug in
+      # body — those live in the URL path).
+      assert_receive {:adapter_called, :patch, "/api/recipes/draft-slug", patch_body}
+      assert patch_body["name"] == "Updated Granola"
+
+      # No search, no create, no update under another path
+      refute_receive {:adapter_called, :get, _, _}, 50
+      refute_receive {:adapter_called, :post, _, _}, 50
     end
   end
 

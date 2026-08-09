@@ -25,7 +25,7 @@ defmodule InstaMealie.Pipeline.Job do
   require Logger
 
   alias InstaMealie.Pipeline
-  alias InstaMealie.LLM
+  alias InstaMealie.Error
   alias InstaMealie.Recipe
   alias InstaMealie.Ingredient
   alias InstaMealie.Pipeline.{JobAdmission, JobStore}
@@ -131,15 +131,7 @@ defmodule InstaMealie.Pipeline.Job do
 
     Logger.info("[pipeline] job #{job.id} retrying import (has recipe)")
 
-    updated =
-      Pipeline.transition(job, [
-        {:retry_count, retry_count},
-        {:stage, :mealie_import, :running}
-      ])
-
-    result = Pipeline.run_import_inline(updated)
-    JobAdmission.release(job.id)
-    {:reply, result, JobStore.get(job.id) || updated}
+    reimport(job, [{:retry_count, retry_count}, {:stage, :mealie_import, :running}])
   end
 
   @impl true
@@ -198,15 +190,7 @@ defmodule InstaMealie.Pipeline.Job do
     ingredients = Ingredient.apply_resolutions(job.recipe.ingredients, resolutions)
     updated_recipe = %{job.recipe | ingredients: ingredients}
 
-    updated =
-      Pipeline.transition(job, [
-        {:recipe, updated_recipe},
-        {:stage, :mealie_import, :running}
-      ])
-
-    result = Pipeline.run_import_inline(updated)
-    JobAdmission.release(job.id)
-    {:reply, result, JobStore.get(job.id) || updated}
+    reimport(job, [{:recipe, updated_recipe}, {:stage, :mealie_import, :running}])
   end
 
   @impl true
@@ -226,6 +210,15 @@ defmodule InstaMealie.Pipeline.Job do
       JobAdmission.release(job.id)
       {:stop, :normal, job}
     end
+  end
+
+  # Re-run the Mealie import on a job that already has a recipe, applying
+  # `changes` first. Used by the import-only retry and by post-review resolution.
+  defp reimport(job, changes) do
+    updated = Pipeline.transition(job, changes)
+    result = Pipeline.run_import_inline(updated)
+    JobAdmission.release(job.id)
+    {:reply, result, JobStore.get(job.id) || updated}
   end
 
   # ---- stage handlers (handle_info) ----
@@ -263,8 +256,8 @@ defmodule InstaMealie.Pipeline.Job do
         job = Pipeline.transition(job, [{:stage, :llm_format, :running}])
         advance(job)
 
-      {:error, class, reason} ->
-        {:noreply, fail_job(job, :fetch, class, reason)}
+      {:error, %Error{} = error} ->
+        {:noreply, fail_job(job, error)}
     end
   end
 
@@ -277,17 +270,19 @@ defmodule InstaMealie.Pipeline.Job do
       {:ok, input, opts} ->
         case InstaMealie.LLM.format(input, opts) do
           {:ok, envelope} ->
-            env = LLM.normalize_envelope(envelope)
-
-            if env.completeness == :unknown do
-              {:noreply, fail_job(job, :llm_format, :validation, "unknown LLM completeness verdict")}
+            if envelope.completeness == :unknown do
+              {:noreply,
+               fail_job(
+                 job,
+                 Error.new(:validation, "unknown LLM completeness verdict", stage: :llm_format)
+               )}
             else
               job =
                 Pipeline.transition(job, [
                   {:stage, :llm_format, :done},
-                  {:recipe, env.recipe},
-                  {:verdict, env.completeness},
-                  {:missing_fields, env.missing_fields}
+                  {:recipe, envelope.recipe},
+                  {:verdict, envelope.completeness},
+                  {:missing_fields, envelope.missing_fields}
                 ])
 
               case Recipe.validate(job.recipe) do
@@ -296,16 +291,24 @@ defmodule InstaMealie.Pipeline.Job do
 
                 {:error, field} ->
                   {:noreply,
-                   fail_job(job, :llm_format, :validation, "recipe field '#{field}' has wrong type")}
+                   fail_job(
+                     job,
+                     Error.new(
+                       :validation,
+                       "recipe field '#{field}' has wrong type",
+                       stage: :llm_format
+                     )
+                   )}
               end
             end
 
-          {:error, class, reason} ->
-            {:noreply, fail_job(job, :llm_format, class, reason)}
+          {:error, %Error{} = error} ->
+            {:noreply, fail_job(job, error)}
         end
 
       {:error, _reason} ->
-        {:noreply, fail_job(job, :llm_format, :validation, "no input for LLM format")}
+        {:noreply,
+         fail_job(job, Error.new(:validation, "no input for LLM format", stage: :llm_format))}
     end
   end
 
@@ -325,9 +328,11 @@ defmodule InstaMealie.Pipeline.Job do
         {:noreply,
          fail_job(
            job,
-           :llm_format,
-           :incomplete_caption,
-           "The pasted caption does not contain a complete recipe, and there is no audio to transcribe."
+           Error.new(
+             :incomplete_caption,
+             "The pasted caption does not contain a complete recipe, and there is no audio to transcribe.",
+             stage: :llm_format
+           )
          )}
     end
   end
@@ -353,12 +358,12 @@ defmodule InstaMealie.Pipeline.Job do
 
             advance(job)
 
-          {:error, class, reason} ->
-            {:noreply, fail_job(job, :transcribe, class, reason)}
+          {:error, %Error{} = error} ->
+            {:noreply, fail_job(job, error)}
         end
 
-      {:error, class, reason} ->
-        {:noreply, fail_job(job, :transcribe, class, reason)}
+      {:error, %Error{} = error} ->
+        {:noreply, fail_job(job, error)}
     end
   end
 
@@ -374,15 +379,17 @@ defmodule InstaMealie.Pipeline.Job do
            draft: job.recipe
          ) do
       {:ok, envelope} ->
-        env = LLM.normalize_envelope(envelope)
-
-        if env.completeness == :unknown do
-          {:noreply, fail_job(job, :llm_merge, :validation, "unknown LLM completeness verdict")}
+        if envelope.completeness == :unknown do
+          {:noreply,
+           fail_job(
+             job,
+             Error.new(:validation, "unknown LLM completeness verdict", stage: :llm_merge)
+           )}
         else
           job =
             Pipeline.transition(job, [
               {:stage, :llm_merge, :done},
-              {:recipe, env.recipe}
+              {:recipe, envelope.recipe}
             ])
 
           case Recipe.validate(job.recipe) do
@@ -391,12 +398,19 @@ defmodule InstaMealie.Pipeline.Job do
 
             {:error, field} ->
               {:noreply,
-               fail_job(job, :llm_merge, :validation, "recipe field '#{field}' has wrong type")}
+               fail_job(
+                 job,
+                 Error.new(
+                   :validation,
+                   "recipe field '#{field}' has wrong type",
+                   stage: :llm_merge
+                 )
+               )}
           end
         end
 
-      {:error, class, reason} ->
-        {:noreply, fail_job(job, :llm_merge, class, reason)}
+      {:error, %Error{} = error} ->
+        {:noreply, fail_job(job, error)}
     end
   end
 
@@ -442,9 +456,9 @@ defmodule InstaMealie.Pipeline.Job do
             advance(job)
           end
 
-        {:error, class, reason} ->
+        {:error, %Error{} = error} ->
           Logger.warning(
-            "[pipeline] job #{job.id} ingredient parse failed (#{class}: #{reason}), importing with raw ingredients"
+            "[pipeline] job #{job.id} ingredient parse failed (#{error.class}: #{error.summary}), importing with raw ingredients"
           )
 
           job = Pipeline.transition(job, [{:stage, :mealie_import, :running}])
@@ -462,7 +476,7 @@ defmodule InstaMealie.Pipeline.Job do
         JobAdmission.release(job.id)
         {:noreply, updated}
 
-      {:error, _class, _reason} ->
+      {:error, %Error{}} ->
         # run_import_inline already transitioned the job to :failed and wrote
         # to JobStore; re-read the canonical failed state.
         JobAdmission.release(job.id)
@@ -476,7 +490,10 @@ defmodule InstaMealie.Pipeline.Job do
 
     if current_stage == :running do
       Logger.error("[pipeline] job #{job.id} timed out at #{stage}")
-      job = fail_job(job, stage, :timeout, "#{stage} stage timed out")
+
+      job =
+        fail_job(job, Error.new(:timeout, "#{stage} stage timed out", stage: stage))
+
       JobAdmission.release(job.id)
       {:stop, :normal, job}
     else
@@ -663,11 +680,11 @@ defmodule InstaMealie.Pipeline.Job do
   # Funnels through Pipeline.transition/2 so the single transition function
   # owns every mutation, ETS write, and broadcast. Returns the transitioned
   # job so callers can wrap it as `{:noreply, job}` themselves.
-  defp fail_job(job, stage, class, reason) do
+  defp fail_job(job, %Error{} = error) do
     Pipeline.transition(job, [
-      {:stage, stage, :failed},
+      {:stage, error.stage, :failed},
       {:state, :failed},
-      {:error, stage, class, reason}
+      {:error, error.stage, error.class, error.summary}
     ])
   end
 end

@@ -1,12 +1,12 @@
 import Config
 
-config :insta_mealie, :skip_preflight, true
+# Adapter mocks — set via Mox expectations in individual tests.
+# When no expectation is set, the real Http module is used as fallback.
+config :insta_mealie, InstaMealie.Mealie, InstaMealie.Mealie.Http
+config :insta_mealie, InstaMealie.LLM, InstaMealie.LLM.Http
+config :insta_mealie, InstaMealie.Whisper, InstaMealie.Whisper.Http
 
-# Isolated test DB path. Per-test isolation comes from `JobStore.clear()` in the
-# test case setup, so a static path is sufficient and avoids the
-# compile-time env mismatch that an interpolated value would trigger
-# (Application.compile_env is called in review_live.ex).
-config :insta_mealie, :insta_mealie, db_path: "/tmp/insta_mealie_test.db"
+config :insta_mealie, :skip_preflight, true
 
 # LLM and Whisper test config (stubs set via Application env adapters in tests)
 config :insta_mealie, :openai,

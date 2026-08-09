@@ -199,22 +199,22 @@ defmodule InstaMealie.PipelineTest do
   end
 
   describe "missing_fields vocab" do
-    test "normalize_envelope drops unknown fields and de-duplicates" do
+    test "envelope_from_json drops unknown fields and de-duplicates" do
       env =
-        InstaMealie.LLM.normalize_envelope(%{
-          completeness: "recipe_partial",
-          missing_fields: [
+        InstaMealie.LLM.envelope_from_json(%{
+          "completeness" => "recipe_partial",
+          "missing_fields" => [
             "recipeIngredient",
             "bogus_field",
             "recipeInstructions",
             "recipeIngredient"
           ],
-          recipe: %{"name" => "X"}
+          "recipe" => %{"name" => "X"}
         })
 
       assert env.completeness == :recipe_partial
       assert env.missing_fields == [:recipeIngredient, :recipeInstructions]
-      assert env.recipe == %{"name" => "X"}
+      assert env.recipe.name == "X"
     end
 
     test "pipeline stores only the allowed missing_fields on the job" do
