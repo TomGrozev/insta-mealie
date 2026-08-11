@@ -55,9 +55,7 @@ defmodule InstaMealie.Pipeline do
 
       mode = if(is_binary(caption) and url == nil, do: :caption_only, else: :url)
 
-      Logger.info(
-        "[pipeline] job created #{id} (mode: #{mode})"
-      )
+      Logger.info("[pipeline] job created #{id} (mode: #{mode})")
 
       job = %Job{
         id: id,
@@ -155,9 +153,13 @@ defmodule InstaMealie.Pipeline do
           do: [:paste_caption | actions],
           else: actions
 
-      # Transcribe-anyway: available when caption-only routing skipped transcription.
+      # Transcribe-anyway: available for any failed job whose error is at the
+      # transcribe or llm_merge stage — skip the audio path and import the
+      # caption-only (routing) recipe already on the job. Mode-agnostic: a URL
+      # job that fails during transcription/merge qualifies as well as a
+      # caption-only one, matching `apply_transcribe_anyway/1`.
       actions =
-        if job.mode == :caption_only and Map.get(job.stages, :transcribe) == :skipped,
+        if job.error_stage in [:transcribe, :llm_merge],
           do: [:transcribe_anyway | actions],
           else: actions
 
@@ -294,7 +296,7 @@ defmodule InstaMealie.Pipeline do
           {:error, _} = error ->
             error
         end
-      end
+    end
   end
 
   @doc """
@@ -564,7 +566,7 @@ defmodule InstaMealie.Pipeline do
   def run_import_inline(job) do
     recipe = job.recipe || Recipe.empty()
 
-    case InstaMealie.Mealie.import_recipe(recipe, job.slug) do
+    case InstaMealie.Mealie.import_recipe(recipe) do
       {:ok, slug, deep_link} ->
         updated =
           transition(job, [
@@ -615,9 +617,7 @@ defmodule InstaMealie.Pipeline do
       end)
 
     if existing do
-      Logger.warning(
-        "[pipeline] duplicate URL detected, existing job #{existing.id}"
-      )
+      Logger.warning("[pipeline] duplicate URL detected, existing job #{existing.id}")
 
       {:error, :duplicate_url, existing.id}
     else

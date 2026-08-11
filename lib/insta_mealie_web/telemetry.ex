@@ -13,19 +13,9 @@ defmodule InstaMealieWeb.Telemetry do
       # every 10_000ms. Learn more here: https://telemetry-metrics.hexdocs.pm
       {:telemetry_poller, measurements: periodic_measurements(), period: 10_000}
       # Add reporters as children of your supervision tree.
-    ] ++ console_reporter()
+    ]
 
     Supervisor.init(children, strategy: :one_for_one)
-  end
-
-  # Conditionally attach the optional ConsoleReporter when its package is
-  # available; production deployments may leave it out, dev/test pick it up.
-  defp console_reporter do
-    if Code.ensure_loaded?(Telemetry.Metrics.ConsoleReporter) do
-      [{Telemetry.Metrics.ConsoleReporter, metrics: metrics()}]
-    else
-      []
-    end
   end
 
   def metrics do

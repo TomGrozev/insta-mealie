@@ -2,7 +2,8 @@ import Config
 
 # Adapter mocks — set via Mox expectations in individual tests.
 # When no expectation is set, the real Http module is used as fallback.
-config :insta_mealie, InstaMealie.Mealie, InstaMealie.Mealie.Http
+# Mealie has no Adapter/Mock split; tests stub :mealie_http_adapter instead
+# (see test/support/insta_mealie/case.ex).
 config :insta_mealie, InstaMealie.LLM, InstaMealie.LLM.Http
 config :insta_mealie, InstaMealie.Whisper, InstaMealie.Whisper.Http
 
