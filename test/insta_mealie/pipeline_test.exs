@@ -4,11 +4,43 @@ defmodule InstaMealie.PipelineTest do
   import Phoenix.LiveViewTest
   import Phoenix.ConnTest
 
+  alias InstaMealie.LLM.Mock, as: LLMMock
   alias InstaMealie.Pipeline
   alias InstaMealie.Pipeline.Job
   alias InstaMealie.Pipeline.JobStore
+  alias InstaMealie.Recipe
 
   @endpoint InstaMealieWeb.Endpoint
+
+  # The merge prompt's user message starts with `"Caption: ... \n\nTranscript: ..."`,
+  # while the format prompt's user message is the raw caption (and OP comments).
+  # Use this substring to distinguish the two LLM calls inside a single stub.
+  defp merge_call?(messages) do
+    case Enum.reverse(messages) |> Enum.find(fn m -> m[:role] == "user" end) do
+      nil -> false
+      msg -> String.contains?(msg[:content] || "", "Transcript:")
+    end
+  end
+
+  # Build the raw OpenAI-style chat response shape `LLM.parse_content/1` expects,
+  # encoded from a (completeness, missing_fields, recipe) triple.
+  defp chat_response(completeness, missing_fields, recipe) do
+    {:ok,
+     %{
+       "choices" => [
+         %{
+           "message" => %{
+             "content" =>
+               Jason.encode!(%{
+                 "completeness" => completeness,
+                 "missing_fields" => missing_fields,
+                 "recipe" => recipe
+               })
+           }
+         }
+       ]
+     }}
+  end
 
   describe "happy path (recipe_complete)" do
     test "create_job runs fetch -> llm_format -> mealie_import and succeeds" do
@@ -36,44 +68,12 @@ defmodule InstaMealie.PipelineTest do
     test "runs transcribe + merge before import" do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
 
-      # First call returns recipe_partial, second (merge) returns recipe_complete
-      Application.put_env(:insta_mealie, :llm_http_adapter, fn body ->
-        messages = body[:messages] || []
-        last_user_msg = Enum.find(Enum.reverse(messages), fn m -> m[:role] == "user" end)
-        content = if last_user_msg, do: last_user_msg[:content] || "", else: ""
-
-        if String.contains?(content, "Transcript:") do
-          {:ok,
-           %{
-             "choices" => [
-               %{
-                 "message" => %{
-                   "content" =>
-                     Jason.encode!(%{
-                       "completeness" => "recipe_complete",
-                       "missing_fields" => [],
-                       "recipe" => %{"name" => "Merged"}
-                     })
-                 }
-               }
-             ]
-           }}
+      # First call returns recipe_partial, second (merge) returns recipe_complete.
+      Mox.stub(LLMMock, :chat, fn _model, messages ->
+        if merge_call?(messages) do
+          chat_response("recipe_complete", [], %{"name" => "Merged"})
         else
-          {:ok,
-           %{
-             "choices" => [
-               %{
-                 "message" => %{
-                   "content" =>
-                     Jason.encode!(%{
-                       "completeness" => "recipe_partial",
-                       "missing_fields" => ["recipeInstructions"],
-                       "recipe" => %{"name" => "Partial"}
-                     })
-                 }
-               }
-             ]
-           }}
+          chat_response("recipe_partial", ["recipeInstructions"], %{"name" => "Partial"})
         end
       end)
 
@@ -146,43 +146,13 @@ defmodule InstaMealie.PipelineTest do
     test "runs transcribe + merge before import (does NOT fail flatly)" do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
 
-      Application.put_env(:insta_mealie, :llm_http_adapter, fn body ->
-        messages = body[:messages] || []
-        last_user_msg = Enum.find(Enum.reverse(messages), fn m -> m[:role] == "user" end)
-        content = if last_user_msg, do: last_user_msg[:content] || "", else: ""
-
-        if String.contains?(content, "Transcript:") do
-          {:ok,
-           %{
-             "choices" => [
-               %{
-                 "message" => %{
-                   "content" =>
-                     Jason.encode!(%{
-                       "completeness" => "recipe_complete",
-                       "missing_fields" => [],
-                       "recipe" => %{"name" => "Transcribed Granola"}
-                     })
-                 }
-               }
-             ]
-           }}
+      # Format returns no_recipe (so the FSM routes through transcribe + merge),
+      # merge returns recipe_complete so mealie_import still runs.
+      Mox.stub(LLMMock, :chat, fn _model, messages ->
+        if merge_call?(messages) do
+          chat_response("recipe_complete", [], %{"name" => "Transcribed Granola"})
         else
-          {:ok,
-           %{
-             "choices" => [
-               %{
-                 "message" => %{
-                   "content" =>
-                     Jason.encode!(%{
-                       "completeness" => "no_recipe",
-                       "missing_fields" => ["recipeIngredient", "recipeInstructions"],
-                       "recipe" => %{}
-                     })
-                 }
-               }
-             ]
-           }}
+          chat_response("no_recipe", ["recipeIngredient", "recipeInstructions"], %{})
         end
       end)
 
@@ -194,69 +164,22 @@ defmodule InstaMealie.PipelineTest do
       assert Map.get(job.stages, :transcribe) == :done
       assert Map.get(job.stages, :llm_merge) == :done
       assert Map.get(job.stages, :mealie_import) == :done
-      assert job.recipe["name"] == "Transcribed Granola"
+      assert %Recipe{name: "Transcribed Granola"} = job.recipe
     end
   end
 
   describe "missing_fields vocab" do
-    test "envelope_from_json drops unknown fields and de-duplicates" do
-      env =
-        InstaMealie.LLM.envelope_from_json(%{
-          "completeness" => "recipe_partial",
-          "missing_fields" => [
-            "recipeIngredient",
-            "bogus_field",
-            "recipeInstructions",
-            "recipeIngredient"
-          ],
-          "recipe" => %{"name" => "X"}
-        })
-
-      assert env.completeness == :recipe_partial
-      assert env.missing_fields == [:recipeIngredient, :recipeInstructions]
-      assert env.recipe.name == "X"
-    end
-
     test "pipeline stores only the allowed missing_fields on the job" do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
 
-      Application.put_env(:insta_mealie, :llm_http_adapter, fn body ->
-        messages = body[:messages] || []
-        last_user_msg = Enum.find(Enum.reverse(messages), fn m -> m[:role] == "user" end)
-        content = if last_user_msg, do: last_user_msg[:content] || "", else: ""
-
-        if String.contains?(content, "Transcript:") do
-          {:ok,
-           %{
-             "choices" => [
-               %{
-                 "message" => %{
-                   "content" =>
-                     Jason.encode!(%{
-                       "completeness" => "recipe_complete",
-                       "missing_fields" => [],
-                       "recipe" => %{"name" => "M"}
-                     })
-                 }
-               }
-             ]
-           }}
+      # Format returns the partial envelope with one unknown field; merge
+      # returns complete (so mealie_import runs) but is irrelevant to this
+      # assertion — `missing_fields` is preserved from the format envelope.
+      Mox.stub(LLMMock, :chat, fn _model, messages ->
+        if merge_call?(messages) do
+          chat_response("recipe_complete", [], %{"name" => "M"})
         else
-          {:ok,
-           %{
-             "choices" => [
-               %{
-                 "message" => %{
-                   "content" =>
-                     Jason.encode!(%{
-                       "completeness" => "recipe_partial",
-                       "missing_fields" => ["recipeIngredient", "nope"],
-                       "recipe" => %{"name" => "P"}
-                     })
-                 }
-               }
-             ]
-           }}
+          chat_response("recipe_partial", ["recipeIngredient", "nope"], %{"name" => "P"})
         end
       end)
 
@@ -285,10 +208,11 @@ defmodule InstaMealie.PipelineTest do
          }}
       end)
 
-      Application.put_env(:insta_mealie, :llm_http_adapter, fn body ->
-        messages = body[:messages] || []
-
-        # Extract comment lines from the user message
+      Mox.stub(LLMMock, :chat, fn _model, messages ->
+        # Extract the OP comment lines the pipeline sent us. Only the final
+        # user message has "  - " prefixed lines (fewshot user messages and
+        # the system prompt don't), so this collects exactly the OP comments
+        # the routing prompt should have included.
         comments =
           messages
           |> Enum.filter(fn m -> m[:role] == "user" end)
@@ -299,29 +223,20 @@ defmodule InstaMealie.PipelineTest do
             |> Enum.map(&String.trim_leading(&1, "  - "))
           end)
 
-        {:ok,
-         %{
-           "choices" => [
-             %{
-               "message" => %{
-                 "content" =>
-                   Jason.encode!(%{
-                     "completeness" => "recipe_complete",
-                     "missing_fields" => [],
-                     "recipe" => %{"name" => "authors:#{Enum.join(comments, ",")}"}
-                   })
-               }
-             }
-           ]
-         }}
+        chat_response(
+          "recipe_complete",
+          [],
+          %{"name" => "authors:#{Enum.join(comments, ",")}"}
+        )
       end)
 
       assert {:ok, id} = Pipeline.create_job(%{url: "https://instagram.com/reel/cm"})
 
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded} = job}, 5000
 
-      # The double echoes the authors it saw; only op_user (twice) should appear.
-      assert job.recipe["name"] == "authors:OP says hi,OP says bye"
+      # The recipe name echoes the authors the LLM saw; only op_user (twice)
+      # should appear, confirming the stranger's comment was filtered out.
+      assert %Recipe{name: "authors:OP says hi,OP says bye"} = job.recipe
     end
   end
 
@@ -330,43 +245,13 @@ defmodule InstaMealie.PipelineTest do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
       conn = build_conn()
 
-      Application.put_env(:insta_mealie, :llm_http_adapter, fn body ->
-        messages = body[:messages] || []
-        last_user_msg = Enum.find(Enum.reverse(messages), fn m -> m[:role] == "user" end)
-        content = if last_user_msg, do: last_user_msg[:content] || "", else: ""
-
-        if String.contains?(content, "Transcript:") do
-          {:ok,
-           %{
-             "choices" => [
-               %{
-                 "message" => %{
-                   "content" =>
-                     Jason.encode!(%{
-                       "completeness" => "recipe_complete",
-                       "missing_fields" => [],
-                       "recipe" => %{"name" => "Merged"}
-                     })
-                 }
-               }
-             ]
-           }}
+      # Format returns recipe_partial, merge returns recipe_complete so the
+      # job reaches mealie_import and the deep-link button renders.
+      Mox.stub(LLMMock, :chat, fn _model, messages ->
+        if merge_call?(messages) do
+          chat_response("recipe_complete", [], %{"name" => "Merged"})
         else
-          {:ok,
-           %{
-             "choices" => [
-               %{
-                 "message" => %{
-                   "content" =>
-                     Jason.encode!(%{
-                       "completeness" => "recipe_partial",
-                       "missing_fields" => ["recipeInstructions"],
-                       "recipe" => %{"name" => "Partial"}
-                     })
-                 }
-               }
-             ]
-           }}
+          chat_response("recipe_partial", ["recipeInstructions"], %{"name" => "Partial"})
         end
       end)
 

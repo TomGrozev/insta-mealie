@@ -1,6 +1,7 @@
 defmodule InstaMealie.PipelineCaptionTest do
   use InstaMealie.TestCase
 
+  alias InstaMealie.Error
   alias InstaMealie.Pipeline
   alias InstaMealie.Pipeline.Job
   alias InstaMealie.Pipeline.JobStore
@@ -28,7 +29,7 @@ defmodule InstaMealie.PipelineCaptionTest do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
 
       Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
-        {:error, :network, "could not reach instagram"}
+        {:error, Error.new(:network, "could not reach instagram", stage: :fetch)}
       end)
 
       assert {:ok, id} = Pipeline.create_job(%{url: "https://instagram.com/reel/abc"})
@@ -63,7 +64,7 @@ defmodule InstaMealie.PipelineCaptionTest do
     test "a caption without a complete recipe fails with :incomplete_caption (non-retryable)" do
       Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
 
-      Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+      Mox.stub(InstaMealie.LLM.Mock, :chat, fn _model, _messages ->
         {:ok,
          %{
            "choices" => [

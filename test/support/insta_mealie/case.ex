@@ -1,22 +1,30 @@
 defmodule InstaMealie.TestCase do
   @moduledoc """
-  Shared test case that sets up Mox mocks for YtDlp and adapter env stubs
-  for LLM, Mealie, and Whisper HTTP services.
+  Shared test case that sets up Mox mock stubs for YtDlp, LLM, and Whisper,
+  plus an env-stored function adapter for Mealie.
+
+  Pipeline stages run their blocking work inside
+  `Task.Supervisor.async_nolink/2` against
+  `InstaMealie.Pipeline.TaskSupervisor` (see `InstaMealie.Pipeline.Job`'s
+  moduledoc). Those task processes are not the test process, so the
+  setup runs in Mox *global mode*. That makes every stub registered in
+  this setup block visible to any process that later calls into the
+  mock — including the dynamically-spawned stage tasks under
+  `InstaMealie.Pipeline.TaskSupervisor` and the per-job GenServers that
+  supervise them. Global mode requires `async: false`, which the
+  `using` block below already enforces.
+
+  The Mealie HTTP adapter is stored under `:mealie_http_adapter` in the
+  `:insta_mealie` application env and is resolved at call time, so no
+  per-process allow is needed for it.
   """
   use ExUnit.CaseTemplate
 
   using do
     quote do
       use ExUnit.Case, async: false
-      import InstaMealie.TestCase, only: [allow_job_services: 1]
     end
   end
-
-  @doc """
-  No-op. Adapter stubs are stored in Application env and are visible to all
-  processes (including pipeline GenServers) without per-process allow.
-  """
-  def allow_job_services(_job_id), do: :ok
 
   defp default_recipe do
     %{
@@ -41,6 +49,14 @@ defmodule InstaMealie.TestCase do
   setup do
     InstaMealie.Pipeline.JobStore.clear()
     InstaMealie.Pipeline.JobAdmission.reset()
+
+    # Each pipeline stage runs in a supervised task under the Pipeline's
+    # TaskSupervisor. Those task processes are not the test process, so
+    # Mox must be in global mode for the stubs registered below to be
+    # visible to them. Global mode is compatible with `async: false`,
+    # which the `using` block above enforces. See
+    # `InstaMealie.Pipeline.Job` moduledoc.
+    Mox.set_mox_global()
 
     # Set YtDlp to Mock (the only behaviour left with Mox)
     Application.put_env(:insta_mealie, InstaMealie.YtDlp, InstaMealie.YtDlp.Mock)
@@ -94,8 +110,16 @@ defmodule InstaMealie.TestCase do
     Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, body ->
       cond do
         m == :post and p == "/api/recipes" ->
+          name = body[:name] || body["name"] || "untitled-recipe"
+
           slug =
-            "homemade-granola-" <> (:crypto.strong_rand_bytes(3) |> Base.encode16(case: :lower))
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          slug = if slug == "", do: "untitled-recipe", else: slug
 
           {:ok, %{"slug" => slug, "id" => slug}}
 
@@ -113,12 +137,30 @@ defmodule InstaMealie.TestCase do
         m == :get and String.starts_with?(p, "/api/units") ->
           {:ok, %{"data" => []}}
 
+        m == :get and String.starts_with?(p, "/api/organizers/") ->
+          {:ok, %{"items" => []}}
+
+        m == :post and String.starts_with?(p, "/api/organizers/") ->
+          name = body[:name] || body["name"] || "untitled-organizer"
+
+          slug =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          slug = if slug == "", do: "untitled-organizer", else: slug
+
+          {:ok, %{"id" => slug, "name" => name, "slug" => slug}}
+
         m == :post and p == "/api/parser/ingredients" ->
           ingredients = body["ingredients"] || []
 
           parsed =
             Enum.map(ingredients, fn ingredient ->
-              name = if is_binary(ingredient), do: ingredient, else: ingredient["text"] || "unknown"
+              name =
+                if is_binary(ingredient), do: ingredient, else: ingredient["text"] || "unknown"
 
               %{
                 "quantity" => 1.0,
@@ -128,7 +170,12 @@ defmodule InstaMealie.TestCase do
                   "id" => "stub-food",
                   "confidence" => 1.0
                 },
-                "confidence" => %{"food" => 1.0, "unit" => 1.0, "quantity" => 1.0, "average" => 1.0},
+                "confidence" => %{
+                  "food" => 1.0,
+                  "unit" => 1.0,
+                  "quantity" => 1.0,
+                  "average" => 1.0
+                },
                 "note" => nil
               }
             end)

@@ -4,6 +4,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
   import Phoenix.LiveViewTest
   import Phoenix.ConnTest
 
+  alias InstaMealie.Error
   alias InstaMealie.Pipeline
   alias InstaMealie.Pipeline.Job
 
@@ -28,7 +29,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
       {id, _} =
         start_failed_job(fn ->
           Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
-            {:error, :network, "could not reach instagram"}
+            {:error, Error.new(:network, "could not reach instagram", stage: :fetch)}
           end)
         end)
 
@@ -47,21 +48,21 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
       refute has_element?(view, "#transcribe-anyway-#{id}")
     end
 
-    test "fetch/ip_banned: paste-only (retry hidden, paste-caption shown)" do
+    test "fetch/ip_banned: retry + paste-caption shown (retryable)" do
       {id, _} =
         start_failed_job(fn ->
           Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
-            {:error, :ip_banned, "ip address banned by instagram"}
+            {:error, Error.new(:ip_banned, "ip address banned by instagram", stage: :fetch)}
           end)
         end)
 
       view = mount_view()
       html = render(view)
 
-      refute has_element?(view, "#retry-#{id}")
+      assert has_element?(view, "#retry-#{id}")
       assert has_element?(view, "#paste-caption-#{id}")
       refute has_element?(view, "#transcribe-anyway-#{id}")
-      assert html =~ "Fetch is blocked"
+      assert html =~ "Fetch failed. Retry, or paste the caption to continue without the reel."
     end
   end
 
@@ -69,7 +70,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     test "transcribe/timeout: retry + transcribe-anyway (with #18 copy)" do
       {id, _} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+          Mox.stub(InstaMealie.LLM.Mock, :chat, fn _model, _messages ->
             {:ok,
              %{
                "choices" => [
@@ -87,8 +88,8 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
              }}
           end)
 
-          Application.put_env(:insta_mealie, :whisper_http_adapter, fn _ ->
-            {:error, :network, "timeout"}
+          Mox.stub(InstaMealie.Whisper.Mock, :transcribe, fn _model, _path, _prompt, _language ->
+            {:error, Error.new(:network, "timeout", stage: :transcribe)}
           end)
         end)
 
@@ -106,8 +107,8 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     test "llm_format/api_error: retry only" do
       {id, _} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
-            {:error, :network, "llm returned 500"}
+          Mox.stub(InstaMealie.LLM.Mock, :chat, fn _model, _messages ->
+            {:error, "llm returned 500"}
           end)
         end)
 
@@ -120,13 +121,15 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     test "llm_merge/api_error: retry + Import caption-only (with #18 copy)" do
       {id, _} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :llm_http_adapter, fn body ->
-            messages = body[:messages] || []
-            last_user_msg = Enum.find(Enum.reverse(messages), fn m -> m[:role] == "user" end)
-            content = if last_user_msg, do: last_user_msg[:content] || "", else: ""
+          Mox.stub(InstaMealie.LLM.Mock, :chat, fn _model, messages ->
+            merge_call? =
+              case Enum.reverse(messages) |> Enum.find(fn m -> m[:role] == "user" end) do
+                nil -> false
+                msg -> String.contains?(msg[:content] || "", "Transcript:")
+              end
 
-            if String.contains?(content, "Transcript:") do
-              {:error, :network, "llm returned 500 on merge"}
+            if merge_call? do
+              {:error, "llm returned 500 on merge"}
             else
               {:ok,
                %{
@@ -163,7 +166,8 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
           Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
             case {m, p} do
               {:post, "/api/recipes"} ->
-                {:error, :validation, "mealie rejected the recipe"}
+                {:error,
+                 Error.new(:validation, "mealie rejected the recipe", stage: :mealie_import)}
 
               _ ->
                 {:ok, %{}}
@@ -187,7 +191,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
           Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
             case {m, p} do
               {:post, "/api/recipes"} ->
-                {:error, :api_error, "mealie returned HTTP 400"}
+                {:error, Error.new(:api_error, "mealie returned HTTP 400", stage: :mealie_import)}
 
               _ ->
                 {:ok, %{}}
@@ -207,7 +211,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
           Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
             case {m, p} do
               {:post, "/api/recipes"} ->
-                {:error, :api_error, "mealie returned HTTP 400"}
+                {:error, Error.new(:api_error, "mealie returned HTTP 400", stage: :mealie_import)}
 
               _ ->
                 {:ok, %{}}
@@ -237,7 +241,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
           Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
             case {m, p} do
               {:post, "/api/recipes"} ->
-                {:error, :network, "mealie is down"}
+                {:error, Error.new(:network, "mealie is down", stage: :mealie_import)}
 
               _ ->
                 {:ok, %{}}
@@ -251,13 +255,13 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
       refute has_element?(view, "#transcribe-anyway-#{id}")
     end
 
-    test "mealie_import/auth: retry shown (auth is retryable)" do
+    test "mealie_import/auth: dead row (no CTAs)" do
       {id, _} =
         start_failed_job(fn ->
           Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
             case {m, p} do
               {:post, "/api/recipes"} ->
-                {:error, :auth, "mealie token rejected"}
+                {:error, Error.new(:auth, "mealie token rejected", stage: :mealie_import)}
 
               _ ->
                 {:ok, %{}}
@@ -266,9 +270,12 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
         end)
 
       view = mount_view()
-      assert has_element?(view, "#retry-#{id}")
+      html = render(view)
+
+      refute has_element?(view, "#retry-#{id}")
       refute has_element?(view, "#paste-caption-#{id}")
       refute has_element?(view, "#transcribe-anyway-#{id}")
+      assert html =~ "This job is dead"
     end
   end
 
@@ -277,7 +284,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
       {id, _} =
         start_failed_job(fn ->
           Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
-            {:error, :network, "could not reach instagram"}
+            {:error, Error.new(:network, "could not reach instagram", stage: :fetch)}
           end)
         end)
 
@@ -298,9 +305,9 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     end
   end
 
-  describe "mealie_import retry preserves created slug" do
-    test "retry reuses the created slug instead of POSTing a new recipe" do
-      {:ok, counter} = Agent.start_link(fn -> %{post: 0, put: 0} end)
+  describe "mealie_import retry reuses existing draft (no duplicate POST)" do
+    test "retry reuses the existing draft slug and does not POST a duplicate" do
+      {:ok, counter} = Agent.start_link(fn -> %{post: 0, patch: 0} end)
 
       on_exit(fn ->
         if Process.alive?(counter), do: Agent.stop(counter)
@@ -308,39 +315,50 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
 
       {id, _job} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
+          # recipe_complete with no tags/categories so this test isolates
+          # import retry/idempotency (no organizer-resolution side-trips).
+          Mox.stub(InstaMealie.LLM.Mock, :chat, fn _model, _messages ->
+            {:ok,
+             %{
+               "choices" => [
+                 %{
+                   "message" => %{
+                     "content" =>
+                       Jason.encode!(%{
+                         "completeness" => "recipe_complete",
+                         "missing_fields" => [],
+                         "recipe" => %{"name" => "Retryable"}
+                       })
+                   }
+                 }
+               ]
+             }}
+          end)
+
+          Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, _body ->
             case {method, path} do
-              {:post, "/api/parser/ingredients"} ->
-                ingredients = if is_list(body), do: body, else: []
+              {:get, "/api/recipes/retryable"} ->
+                # The draft exists only after the first POST has created it.
+                post_count = Agent.get(counter, & &1.post)
 
-                parsed =
-                  Enum.map(ingredients, fn _ing ->
-                    %{
-                      "quantity" => nil,
-                      "unit" => %{"name" => nil},
-                      "food" => %{
-                        "name" => "unknown",
-                        "id" => "stub-food",
-                        "confidence" => 1.0
-                      },
-                      "note" => nil
-                    }
-                  end)
-
-                {:ok, parsed}
+                if post_count == 0 do
+                  {:error, Error.new(:api_error, "not found")}
+                else
+                  {:ok, %{"slug" => "retryable"}}
+                end
 
               {:post, "/api/recipes"} ->
                 Agent.update(counter, fn s -> %{s | post: s.post + 1} end)
-                {:ok, %{"slug" => "initial-slug", "id" => "initial-slug"}}
+                {:ok, %{"slug" => "retryable", "id" => "retryable"}}
 
-              {:put, "/api/recipes/" <> _slug} ->
-                current_put = Agent.get(counter, & &1.put)
-                Agent.update(counter, fn s -> %{s | put: s.put + 1} end)
+              {:patch, "/api/recipes/retryable"} ->
+                current_patch = Agent.get(counter, & &1.patch)
+                Agent.update(counter, fn s -> %{s | patch: s.patch + 1} end)
 
-                if current_put == 0 do
-                  {:error, :api_error, "first PUT failed"}
+                if current_patch == 0 do
+                  {:error, Error.new(:api_error, "first PATCH failed", stage: :mealie_import)}
                 else
-                  {:ok, %{"slug" => "initial-slug"}}
+                  {:ok, %{"slug" => "retryable"}}
                 end
 
               _ ->
@@ -349,7 +367,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
           end)
         end)
 
-      # Job should have failed at mealie_import
+      # First attempt failed at mealie_import.
       failed_job = Pipeline.get_job(id)
       assert failed_job.error_stage == :mealie_import
 
@@ -359,16 +377,18 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
       view |> element("#retry-#{id}") |> render_click()
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded}}, 5000
 
-      %{post: post_count, put: put_count} = Agent.get(counter, & &1)
+      %{post: post_count, patch: patch_count} = Agent.get(counter, & &1)
 
+      # Exactly one POST: the retry must reuse the existing draft, not create a duplicate.
       assert post_count == 1,
-             "Expected exactly 1 POST (no duplicate draft), got #{post_count}"
+             "Expected exactly 1 POST (no duplicate draft on retry), got #{post_count}"
 
-      assert put_count == 2,
-             "Expected exactly 2 PUTs (original + retry), got #{put_count}"
+      # Exactly two PATCHes: the original attempt + the retry.
+      assert patch_count == 2,
+             "Expected exactly 2 PATCHes (original + retry), got #{patch_count}"
 
       updated_job = Pipeline.get_job(id)
-      assert updated_job.slug == "initial-slug"
+      assert updated_job.slug == "retryable"
     end
   end
 
@@ -377,7 +397,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
       {id, _} =
         start_failed_job(fn ->
           Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
-            {:error, :network, "could not reach instagram"}
+            {:error, Error.new(:network, "could not reach instagram", stage: :fetch)}
           end)
         end)
 
@@ -396,7 +416,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     test "transcribe-anyway: clicking triggers the skip-audio re-run and hides the button" do
       {id, _} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+          Mox.stub(InstaMealie.LLM.Mock, :chat, fn _model, _messages ->
             {:ok,
              %{
                "choices" => [
@@ -414,8 +434,8 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
              }}
           end)
 
-          Application.put_env(:insta_mealie, :whisper_http_adapter, fn _ ->
-            {:error, :network, "timeout"}
+          Mox.stub(InstaMealie.Whisper.Mock, :transcribe, fn _model, _path, _prompt, _language ->
+            {:error, Error.new(:network, "timeout", stage: :transcribe)}
           end)
         end)
 

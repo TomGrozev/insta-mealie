@@ -4,9 +4,11 @@ defmodule InstaMealieWeb.JobsLiveTranscribeAnywayTest do
   import Phoenix.LiveViewTest
   import Phoenix.ConnTest
 
+  alias InstaMealie.Error
   alias InstaMealie.Pipeline
   alias InstaMealie.Pipeline.Job
   alias InstaMealie.Pipeline.JobStore
+  alias InstaMealie.Recipe
 
   @endpoint InstaMealieWeb.Endpoint
 
@@ -28,7 +30,7 @@ defmodule InstaMealieWeb.JobsLiveTranscribeAnywayTest do
     test "transcribe/timeout: clicking Transcribe-anyway re-runs and imports the caption-only recipe (one-shot)" do
       {id, _} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :llm_http_adapter, fn _body ->
+          Mox.stub(InstaMealie.LLM.Mock, :chat, fn _model, _messages ->
             {:ok,
              %{
                "choices" => [
@@ -46,8 +48,8 @@ defmodule InstaMealieWeb.JobsLiveTranscribeAnywayTest do
              }}
           end)
 
-          Application.put_env(:insta_mealie, :whisper_http_adapter, fn _ ->
-            {:error, :network, "timeout"}
+          Mox.stub(InstaMealie.Whisper.Mock, :transcribe, fn _model, _path, _prompt, _language ->
+            {:error, Error.new(:network, "timeout", stage: :transcribe)}
           end)
         end)
 
@@ -67,7 +69,7 @@ defmodule InstaMealieWeb.JobsLiveTranscribeAnywayTest do
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded}}, 5000
       job = Pipeline.get_job(id)
       assert job.mode == :skip_audio
-      assert job.recipe == %{"name" => "Partial"}
+      assert %Recipe{name: "Partial"} = job.recipe
       refute has_element?(view, "#transcribe-anyway-#{id}")
       assert has_element?(view, "#deep-link-#{id}")
     end
@@ -75,13 +77,15 @@ defmodule InstaMealieWeb.JobsLiveTranscribeAnywayTest do
     test "llm_merge/api_error: Import caption-only re-runs and imports the routing recipe (one-shot)" do
       {id, _} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :llm_http_adapter, fn body ->
-            messages = body[:messages] || []
-            last_user_msg = Enum.find(Enum.reverse(messages), fn m -> m[:role] == "user" end)
-            content = if last_user_msg, do: last_user_msg[:content] || "", else: ""
+          Mox.stub(InstaMealie.LLM.Mock, :chat, fn _model, messages ->
+            merge_call? =
+              case Enum.reverse(messages) |> Enum.find(fn m -> m[:role] == "user" end) do
+                nil -> false
+                msg -> String.contains?(msg[:content] || "", "Transcript:")
+              end
 
-            if String.contains?(content, "Transcript:") do
-              {:error, :network, "llm returned 500 on merge"}
+            if merge_call? do
+              {:error, "llm returned 500 on merge"}
             else
               {:ok,
                %{
@@ -101,8 +105,8 @@ defmodule InstaMealieWeb.JobsLiveTranscribeAnywayTest do
             end
           end)
 
-          Application.put_env(:insta_mealie, :whisper_http_adapter, fn _ ->
-            {:error, :network, "timeout"}
+          Mox.stub(InstaMealie.Whisper.Mock, :transcribe, fn _model, _path, _prompt, _language ->
+            {:error, Error.new(:network, "timeout", stage: :transcribe)}
           end)
         end)
 
@@ -122,7 +126,7 @@ defmodule InstaMealieWeb.JobsLiveTranscribeAnywayTest do
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded}}, 5000
       job = Pipeline.get_job(id)
       assert job.mode == :skip_audio
-      assert job.recipe == %{"name" => "Partial"}
+      assert %Recipe{name: "Partial"} = job.recipe
       refute has_element?(view, "#transcribe-anyway-#{id}")
       assert has_element?(view, "#deep-link-#{id}")
     end
@@ -137,7 +141,7 @@ defmodule InstaMealieWeb.JobsLiveTranscribeAnywayTest do
         state: :created,
         stage: nil,
         stages: %{},
-        recipe: %{"name" => "Partial"},
+        recipe: %Recipe{name: "Partial"},
         verdict: :recipe_partial,
         missing_fields: [:recipeInstructions],
         slug: nil,

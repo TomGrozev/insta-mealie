@@ -4,6 +4,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
   import Phoenix.LiveViewTest
   import Phoenix.ConnTest
 
+  alias InstaMealie.Error
   alias InstaMealie.Pipeline
   alias InstaMealie.Pipeline.Job
   alias InstaMealie.Pipeline.JobStore
@@ -30,7 +31,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
   end
 
   defp review_mealie_setup do
-    Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, _body ->
+    Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
       parsed_ingredients = [
         %{
           "quantity" => 3,
@@ -58,16 +59,34 @@ defmodule InstaMealieWeb.ReviewLiveTest do
 
       cond do
         method == :post and path == "/api/recipes" ->
-          {:ok, %{"slug" => "review-slug", "id" => "review-slug"}}
+          {:ok, %{"slug" => "homemade-granola", "id" => "homemade-granola"}}
 
-        method == :put and String.starts_with?(path, "/api/recipes/") ->
-          {:ok, %{"slug" => "review-slug"}}
+        method == :patch and String.starts_with?(path, "/api/recipes/") ->
+          slug = Path.basename(path)
+          {:ok, %{"slug" => slug}}
 
         method == :get and String.starts_with?(path, "/api/foods") ->
           {:ok, %{"data" => ["mystery-spice", "paprika", "cumin"]}}
 
         method == :get and String.starts_with?(path, "/api/units") ->
           {:ok, %{"data" => ["cups", "tbsp"]}}
+
+        method == :get and String.starts_with?(path, "/api/organizers/") ->
+          {:ok, %{"items" => []}}
+
+        method == :post and String.starts_with?(path, "/api/organizers/") ->
+          name = body[:name] || body["name"] || "untitled-organizer"
+
+          slug =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          slug = if slug == "", do: "untitled-organizer", else: slug
+
+          {:ok, %{"id" => slug, "name" => name, "slug" => slug}}
 
         method == :post and path == "/api/parser/ingredients" ->
           {:ok, parsed_ingredients}
@@ -79,7 +98,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
   end
 
   defp review_zero_candidate_mealie_setup do
-    Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, _body ->
+    Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
       parsed_ingredients = [
         %{
           "quantity" => 3,
@@ -101,16 +120,34 @@ defmodule InstaMealieWeb.ReviewLiveTest do
 
       cond do
         method == :post and path == "/api/recipes" ->
-          {:ok, %{"slug" => "review-zero-slug", "id" => "review-zero-slug"}}
+          {:ok, %{"slug" => "homemade-granola", "id" => "homemade-granola"}}
 
-        method == :put and String.starts_with?(path, "/api/recipes/") ->
-          {:ok, %{"slug" => "review-zero-slug"}}
+        method == :patch and String.starts_with?(path, "/api/recipes/") ->
+          slug = Path.basename(path)
+          {:ok, %{"slug" => slug}}
 
         method == :get and String.starts_with?(path, "/api/foods") ->
           {:ok, %{"data" => ["paprika", "cumin"]}}
 
         method == :get and String.starts_with?(path, "/api/units") ->
           {:ok, %{"data" => ["cups", "tbsp"]}}
+
+        method == :get and String.starts_with?(path, "/api/organizers/") ->
+          {:ok, %{"items" => []}}
+
+        method == :post and String.starts_with?(path, "/api/organizers/") ->
+          name = body[:name] || body["name"] || "untitled-organizer"
+
+          slug =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          slug = if slug == "", do: "untitled-organizer", else: slug
+
+          {:ok, %{"id" => slug, "name" => name, "slug" => slug}}
 
         method == :post and path == "/api/parser/ingredients" ->
           {:ok, parsed_ingredients}
@@ -144,7 +181,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
 
       cond do
         method == :post and path == "/api/recipes" ->
-          {:error, :validation, "rejected"}
+          {:error, Error.new(:validation, "rejected", stage: :mealie_import)}
 
         method == :get and String.starts_with?(path, "/api/foods") ->
           {:ok, %{"data" => ["mystery-spice", "paprika", "cumin"]}}
@@ -184,7 +221,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
 
       cond do
         method == :post and path == "/api/recipes" ->
-          {:error, :network, "down"}
+          {:error, Error.new(:network, "down", stage: :mealie_import)}
 
         method == :get and String.starts_with?(path, "/api/foods") ->
           {:ok, %{"data" => ["mystery-spice", "paprika", "cumin"]}}
@@ -313,57 +350,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
       assert html =~ "Import error"
 
       # Swap mealie stub to default success for the retry
-      Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, _body ->
-        parsed_ingredients = [
-          %{
-            "quantity" => 3,
-            "unit" => %{"name" => "cups", "id" => "unit-cups"},
-            "food" => %{
-              "name" => "mystery-spice",
-              "id" => nil,
-              "confidence" => 0.3
-            },
-            "note" => nil
-          },
-          %{
-            "quantity" => nil,
-            "unit" => %{"name" => nil, "id" => "unit-1"},
-            "food" => %{"name" => "paprika", "id" => "food-1", "confidence" => 1.0},
-            "note" => nil
-          },
-          %{
-            "quantity" => nil,
-            "unit" => %{"name" => nil, "id" => "unit-1"},
-            "food" => %{"name" => "cumin", "id" => "food-2", "confidence" => 1.0},
-            "note" => nil
-          }
-        ]
-
-        cond do
-          method == :post and path == "/api/recipes" ->
-            slug =
-              "homemade-granola-" <>
-                (:crypto.strong_rand_bytes(3) |> Base.encode16(case: :lower))
-
-            {:ok, %{"slug" => slug, "id" => slug}}
-
-          method == :put and String.starts_with?(path, "/api/recipes/") ->
-            slug = Path.basename(path)
-            {:ok, %{"slug" => slug}}
-
-          method == :get and String.starts_with?(path, "/api/foods") ->
-            {:ok, %{"data" => ["paprika", "cumin"]}}
-
-          method == :get and String.starts_with?(path, "/api/units") ->
-            {:ok, %{"data" => ["cups", "tbsp"]}}
-
-          method == :post and path == "/api/parser/ingredients" ->
-            {:ok, parsed_ingredients}
-
-          true ->
-            {:ok, %{}}
-        end
-      end)
+      review_mealie_setup()
 
       Pipeline.retry(id)
       job = Pipeline.get_job(id)
@@ -433,7 +420,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
 
       html = render(view)
       assert html =~ "Recipe imported!"
-      assert has_element?(view, "#import-review-submit") |> then(fn _ -> true end) or true
+      refute has_element?(view, "#import-review-submit")
 
       job = Pipeline.get_job(id)
       assert job.state == :succeeded

@@ -4,6 +4,7 @@ defmodule InstaMealieWeb.JobsLivePasteCaptionTest do
   import Phoenix.LiveViewTest
   import Phoenix.ConnTest
 
+  alias InstaMealie.Error
   alias InstaMealie.Pipeline
   alias InstaMealie.Pipeline.Job
 
@@ -15,7 +16,6 @@ defmodule InstaMealieWeb.JobsLivePasteCaptionTest do
     Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
     setup_fn.()
     assert {:ok, id} = Pipeline.create_job(%{url: url})
-    allow_job_services(id)
     assert_receive {:job_updated, %Job{id: ^id, state: :failed}}, 5000
     {id, Pipeline.get_job(id)}
   end
@@ -25,7 +25,7 @@ defmodule InstaMealieWeb.JobsLivePasteCaptionTest do
       {id, _} =
         start_failed_job(fn ->
           Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
-            {:error, :network, "could not reach instagram"}
+            {:error, Error.new(:network, "could not reach instagram", stage: :fetch)}
           end)
         end)
 
@@ -45,29 +45,21 @@ defmodule InstaMealieWeb.JobsLivePasteCaptionTest do
         "caption" => "1 cup flour. Bake 20 min."
       })
 
-      # Allow the new GenServer
-      receive do
-        {:job_updated, %Job{id: new_id}} ->
-          allow_job_services(new_id)
-      after
-        0 -> :ok
-      end
-
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded}}, 5000
       assert render(view) =~ "Open in Mealie"
     end
 
-    test "ip_banned fetch failure offers paste-only (no Retry) and still imports on paste" do
+    test "ip_banned fetch failure offers paste-only (Retry visible) and still imports on paste" do
       {id, _} =
         start_failed_job(fn ->
           Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
-            {:error, :ip_banned, "ip address banned by instagram"}
+            {:error, Error.new(:ip_banned, "ip address banned by instagram", stage: :fetch)}
           end)
         end)
 
       {:ok, view, _html} = live(build_conn(), "/")
       _html = render(view)
-      refute has_element?(view, "#retry-#{id}")
+      assert has_element?(view, "#retry-#{id}")
       assert has_element?(view, "#paste-caption-#{id}")
 
       # Click paste-caption to reveal the form
@@ -81,14 +73,6 @@ defmodule InstaMealieWeb.JobsLivePasteCaptionTest do
         "job-id" => id,
         "caption" => "1 cup flour. Bake 20 min."
       })
-
-      # Allow the new GenServer
-      receive do
-        {:job_updated, %Job{id: new_id}} ->
-          allow_job_services(new_id)
-      after
-        0 -> :ok
-      end
 
       assert_receive {:job_updated, %Job{id: ^id, state: :succeeded}}, 5000
       assert render(view) =~ "Open in Mealie"
@@ -123,14 +107,6 @@ defmodule InstaMealieWeb.JobsLivePasteCaptionTest do
       view
       |> form("#caption-create-form", %{"caption" => "1 cup flour. Bake 20 min."})
       |> render_submit()
-
-      # Allow the GenServer
-      receive do
-        {:job_updated, %Job{id: id}} ->
-          allow_job_services(id)
-      after
-        0 -> :ok
-      end
 
       assert_receive {:job_updated, %Job{state: :succeeded}}, 5000
       assert render(view) =~ "Open in Mealie"
