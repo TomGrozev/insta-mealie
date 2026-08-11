@@ -158,19 +158,19 @@ defmodule InstaMealie.Ingredient do
   """
   @spec needs_review?(t()) :: boolean()
   def needs_review?(%__MODULE__{} = ing) do
-    food_ok = ing.food.id && food_conf_ok?(ing)
-    unit_ok = ing.unit.id && unit_conf_ok?(ing)
+    food_ok = is_binary(ing.food.id) && food_conf_ok?(ing)
+    unit_ok = is_binary(ing.unit.id) && unit_conf_ok?(ing)
     not (food_ok and unit_ok)
   end
 
   defp food_conf_ok?(ing) do
     conf = ing.food.confidence || ing.average_confidence
-    conf && conf >= @threshold
+    is_number(conf) && conf >= @threshold
   end
 
   defp unit_conf_ok?(ing) do
     conf = ing.unit.confidence || ing.average_confidence
-    conf && conf >= @threshold
+    is_number(conf) && conf >= @threshold
   end
 
   @doc """
@@ -214,9 +214,15 @@ defmodule InstaMealie.Ingredient do
           ing
 
         %{"food" => food, "unit" => unit} = res ->
+          food_name = if(food && food != "", do: food)
+          unit_name = if(unit && unit != "", do: unit)
+
+          food_id = res["food_id"] || (if food_name == ing.food.name, do: ing.food.id)
+          unit_id = res["unit_id"] || (if unit_name == ing.unit.name, do: ing.unit.id)
+
           %{ing |
-            food: %Ref{name: food, id: res["food_id"], confidence: nil},
-            unit: %Ref{name: if(unit && unit != "", do: unit), id: res["unit_id"], confidence: nil},
+            food: %Ref{name: food_name, id: food_id, confidence: nil},
+            unit: %Ref{name: unit_name, id: unit_id, confidence: nil},
             status: :resolved
           }
 
@@ -230,11 +236,13 @@ defmodule InstaMealie.Ingredient do
   Project a `%Ingredient{}` into the string-keyed map Mealie's PUT expects.
 
   `food` and `unit` are emitted as nested objects with `id` and `name` keys
-  (matching Mealie's Pydantic model) — only `id` when both are known, only
-  `name` when name-only, and the whole key is omitted when neither. `note`
-  and the original ingredient line (`originalText`) are included when
-  non-nil. Flat `food_id` / `unit_id` keys are intentionally NOT emitted:
-  Mealie's Pydantic model silently discards them.
+  (matching Mealie's Pydantic model) — ONLY when both `id` and `name` are
+  present. When `name` is present without an `id`, the key is omitted
+  entirely: Mealie's ORM requires an `id` for MANYTOONE relationships, and
+  omitting the key lets Mealie's PATCH merge preserve the existing
+  relationship. `note` and the original ingredient line (`originalText`)
+  are included when non-nil. Flat `food_id` / `unit_id` keys are
+  intentionally NOT emitted: Mealie's Pydantic model silently discards them.
   """
   @spec to_payload(t()) :: map()
   def to_payload(%__MODULE__{} = ing) do
@@ -243,10 +251,11 @@ defmodule InstaMealie.Ingredient do
     payload =
       if not is_nil(ing.quantity), do: Map.put(payload, "quantity", ing.quantity), else: payload
 
+    # Omit food/unit when there's no ID — Mealie's ORM requires ID for MANYTOONE
+    # relationships. Omitting preserves whatever exists in Mealie (PATCH merges).
     food =
       cond do
         ing.food.id && ing.food.name -> %{"id" => ing.food.id, "name" => ing.food.name}
-        ing.food.name -> %{"name" => ing.food.name}
         true -> nil
       end
 
@@ -255,7 +264,6 @@ defmodule InstaMealie.Ingredient do
     unit =
       cond do
         ing.unit.id && ing.unit.name -> %{"id" => ing.unit.id, "name" => ing.unit.name}
-        ing.unit.name -> %{"name" => ing.unit.name}
         true -> nil
       end
 

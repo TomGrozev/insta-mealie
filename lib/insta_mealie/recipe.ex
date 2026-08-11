@@ -46,7 +46,7 @@ defmodule InstaMealie.Recipe do
     {:ingredients, "recipeIngredient"},
     {:instructions, "recipeInstructions"},
     {:tags, "tags"},
-    {:categories, "categories"},
+    {:categories, "recipeCategory"},
     {:notes, "notes"},
     {:total_time, "totalTime"},
     {:prep_time, "prepTime"},

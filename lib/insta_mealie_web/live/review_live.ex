@@ -1,6 +1,7 @@
 defmodule InstaMealieWeb.ReviewLive do
   use InstaMealieWeb, :live_view
 
+  alias InstaMealie.Error
   alias InstaMealie.Ingredient
   alias InstaMealie.Pipeline
   alias InstaMealie.PubSub
@@ -105,12 +106,12 @@ defmodule InstaMealieWeb.ReviewLive do
 
         {:noreply, socket}
 
-      {:error, :validation, _reason} ->
-        socket = assign(socket, :dead, true)
+      {:error, %Error{class: class}} when class in [:network, :auth] ->
+        socket = assign(socket, :import_error, class)
         {:noreply, socket}
 
-      {:error, class, _reason} when class in [:network, :auth] ->
-        socket = assign(socket, :import_error, class)
+      {:error, _} ->
+        socket = assign(socket, :dead, true)
         {:noreply, socket}
     end
   end

@@ -229,12 +229,23 @@ defmodule InstaMealie.Pipeline.Job do
 
   @impl true
   def handle_call(:transcribe_anyway, _from, %{job: job} = state) do
+    # Capture the routing recipe before the reset so it survives the recovery
+    # path. The :skip_audio re-entry skips fetch/transcribe/llm_merge and marks
+    # llm_format :done without running it, so the previously extracted recipe,
+    # verdict, and missing_fields are the only source of truth for import.
+    recipe = job.recipe
+    verdict = job.verdict
+    missing_fields = job.missing_fields
+
     updated =
       Pipeline.transition(job, [
         {:state, :created},
         {:mode, :skip_audio},
         {:reset},
-        {:clear_error}
+        {:clear_error},
+        {:recipe, recipe},
+        {:verdict, verdict},
+        {:missing_fields, missing_fields}
       ])
 
     {:reply, :ok, %{state | job: updated}, {:continue, :start_pipeline}}
@@ -868,11 +879,21 @@ defmodule InstaMealie.Pipeline.Job do
   # Funnels through Pipeline.transition/2 so the single transition function
   # owns every mutation, ETS write, and broadcast. Returns the transitioned
   # job so callers can wrap it as `{:noreply, job}` themselves.
+  #
+  # Normalizes `%Error{stage: nil}` to the current `job.stage` so the
+  # stage-failed transition, the failure telemetry, and the job's
+  # `error_stage` field all point at the stage that actually handled the
+  # failure. Stage adapters (notably `LLM.format`/`LLM.merge`) don't know
+  # which stage they're called from and return errors without `:stage` —
+  # we attribute those to the stage that was just transitioned to
+  # `:running`. Explicitly supplied stages are preserved.
   defp fail_job(job, %Error{} = error) do
+    error = if error.stage, do: error, else: %{error | stage: job.stage}
+
     Pipeline.transition(job, [
       {:stage, error.stage, :failed},
       {:state, :failed},
-      {:error, error.stage, error.class, error.summary}
+      {:error, error}
     ])
   end
 end
