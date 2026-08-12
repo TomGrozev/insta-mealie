@@ -20,9 +20,7 @@ defmodule InstaMealieWeb.ReviewLive do
           |> assign(:not_reviewable, true)
 
         true ->
-          ingredients =
-            (job.recipe && job.recipe.ingredients || [])
-            |> Enum.filter(&(&1.status == :needs_review))
+          ingredients = (job.recipe && job.recipe.ingredients) || []
 
           {food_candidates, unit_candidates, selected_food, selected_unit, food_terms, unit_terms} =
             Enum.reduce(ingredients, {%{}, %{}, %{}, %{}, %{}, %{}}, fn ing, acc ->
@@ -329,74 +327,114 @@ defmodule InstaMealieWeb.ReviewLive do
     <Layouts.app flash={@flash}>
       <%= if @not_reviewable do %>
         <div class="space-y-4">
-          <div class="rounded-2xl border border-base-300 bg-base-100 p-6 text-center">
-            <p class="text-base-content/70">Nothing to review.</p>
+          <div class="flex flex-col items-center gap-3 rounded-2xl border border-base-300 bg-base-100 p-10 text-center">
+            <span class="flex size-12 items-center justify-center rounded-full bg-base-200 text-base-content/45">
+              <.icon name="hero-document-magnifying-glass" class="size-6" />
+            </span>
+            <p class="text-sm text-base-content/70">Nothing to review.</p>
           </div>
-          <.link navigate={~p"/"} class="text-sm text-primary hover:underline">
-            ← Back to jobs
+          <.link
+            navigate={~p"/"}
+            class="inline-flex items-center gap-1.5 text-sm text-primary transition hover:gap-2 hover:underline"
+          >
+            <.icon name="hero-arrow-left" class="size-4" /> Back to jobs
           </.link>
         </div>
       <% else %>
         <%= if @imported do %>
           <div class="space-y-4">
-            <div class="rounded-2xl border border-success/30 bg-success/5 p-6 text-center">
-              <p class="font-display text-lg font-semibold text-success">Recipe imported!</p>
+            <div class="flex flex-col items-center gap-3 rounded-2xl border border-success/30 bg-success/5 p-10 text-center">
+              <span class="flex size-12 items-center justify-center rounded-full bg-success/15 text-success">
+                <.icon name="hero-check-circle" class="size-7" />
+              </span>
+              <p class="font-display text-xl font-semibold tracking-tight text-success">
+                Recipe imported!
+              </p>
               <%= if @deep_link do %>
                 <a
                   href={@deep_link}
                   target="_blank"
                   rel="noopener noreferrer"
-                  class="mt-3 inline-block rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-content transition hover:opacity-90"
+                  class="mt-1 inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-content transition hover:opacity-90"
                 >
-                  Open in Mealie <.icon name="hero-arrow-top-right-on-square" class="inline size-4" />
+                  Open in Mealie <.icon name="hero-arrow-top-right-on-square" class="size-4" />
                 </a>
               <% end %>
             </div>
-            <.link navigate={~p"/"} class="text-sm text-primary hover:underline">
-              ← Back to jobs
+            <.link
+              navigate={~p"/"}
+              class="inline-flex items-center gap-1.5 text-sm text-primary transition hover:gap-2 hover:underline"
+            >
+              <.icon name="hero-arrow-left" class="size-4" /> Back to jobs
             </.link>
           </div>
         <% else %>
           <%= if @dead do %>
             <div class="space-y-4">
-              <div class="rounded-2xl border border-error/30 bg-error/5 p-6 text-center">
-                <p class="font-display text-lg font-semibold text-error">Import failed</p>
-                <p class="mt-1 text-sm text-base-content/70">
+              <div class="flex flex-col items-center gap-3 rounded-2xl border border-error/30 bg-error/5 p-10 text-center">
+                <span class="flex size-12 items-center justify-center rounded-full bg-error/15 text-error">
+                  <.icon name="hero-x-circle" class="size-7" />
+                </span>
+                <p class="font-display text-xl font-semibold tracking-tight text-error">
+                  Import failed
+                </p>
+                <p class="max-w-sm text-sm text-base-content/70">
                   The recipe was rejected by Mealie. Fix the source and create a new job.
                 </p>
               </div>
-              <.link navigate={~p"/"} class="text-sm text-primary hover:underline">
-                ← Back to jobs
+              <.link
+                navigate={~p"/"}
+                class="inline-flex items-center gap-1.5 text-sm text-primary transition hover:gap-2 hover:underline"
+              >
+                <.icon name="hero-arrow-left" class="size-4" /> Back to jobs
               </.link>
             </div>
           <% else %>
             <%= if @import_error do %>
               <div class="space-y-4">
                 <div class="rounded-2xl border border-error/30 bg-error/5 p-6">
-                  <p class="font-display text-lg font-semibold text-error">Import error</p>
-                  <p class="mt-1 text-sm text-base-content/70">
-                    {to_string(@import_error)} error during import. You can retry.
-                  </p>
+                  <div class="flex items-start gap-3">
+                    <span class="mt-0.5 shrink-0 text-error">
+                      <.icon name="hero-exclamation-circle" class="size-6" />
+                    </span>
+                    <div class="min-w-0 flex-1 space-y-1">
+                      <p class="font-display text-lg font-semibold tracking-tight text-error">
+                        Import error
+                      </p>
+                      <p class="text-sm text-base-content/70">
+                        {to_string(@import_error)} error during import. You can retry.
+                      </p>
+                    </div>
+                  </div>
                   <button
                     id="retry-review"
                     type="button"
                     phx-click="retry-review"
-                    class="mt-3 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
+                    class="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
                   >
-                    Retry
+                    <.icon name="hero-arrow-path" class="size-4" /> Retry
                   </button>
                 </div>
-                <.link navigate={~p"/"} class="text-sm text-primary hover:underline">
-                  ← Back to jobs
+                <.link
+                  navigate={~p"/"}
+                  class="inline-flex items-center gap-1.5 text-sm text-primary transition hover:gap-2 hover:underline"
+                >
+                  <.icon name="hero-arrow-left" class="size-4" /> Back to jobs
                 </.link>
               </div>
             <% else %>
-              <div class="space-y-6">
+              <div class="space-y-7">
                 <div>
-                  <h1 class="font-display text-2xl font-semibold text-base-content">
+                  <.link
+                    navigate={~p"/"}
+                    class="mb-4 inline-flex items-center gap-1.5 text-sm text-base-content/55 transition hover:gap-2 hover:text-base-content"
+                  >
+                    <.icon name="hero-arrow-left" class="size-4" /> Back to jobs
+                  </.link>
+                  <h1 class="font-display text-2xl font-semibold tracking-tight text-base-content sm:text-3xl">
                     Ingredient Review
                   </h1>
-                  <p class="mt-1 text-sm text-base-content/60">
+                  <p class="mt-1.5 text-sm text-base-content/60">
                     {@recipe_name} — confirm or correct unknown ingredients before import.
                   </p>
                 </div>
@@ -406,27 +444,36 @@ defmodule InstaMealieWeb.ReviewLive do
                   phx-submit="import"
                   for={%{}}
                   as={:review}
-                  class="space-y-4"
+                  class="space-y-3"
                 >
                   <%= for ing <- @ingredients do %>
+                    <% band = Ingredient.confidence_band(ing) %>
+                    <% needs_review? = ing.status == :needs_review %>
                     <details
-                      class="rounded-2xl border border-base-300 bg-base-100 shadow-sm group"
-                      open={ing.status == :needs_review}
+                      class={[
+                        "group rounded-2xl border bg-base-100 shadow-sm transition",
+                        "open:bg-base-100",
+                        details_border_classes(needs_review?, band)
+                      ]}
+                      open={needs_review?}
                     >
-                      <summary class="flex cursor-pointer flex-col gap-3 p-4 list-none sm:flex-row sm:items-start sm:justify-between">
-                        <div class="flex-1">
-                          <p class="text-xs font-semibold uppercase tracking-wide text-base-content/60">
+                      <summary class="flex cursor-pointer flex-col gap-3 p-4 list-none transition hover:bg-base-200/40 sm:flex-row sm:items-start sm:justify-between">
+                        <div class="min-w-0 flex-1">
+                          <p class="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.18em] text-base-content/45">
+                            <%= if needs_review? do %>
+                              <span class="size-1.5 rounded-full bg-warning"></span>
+                            <% end %>
                             Source ingredient
                           </p>
-                          <p class="mt-1 font-display text-base font-semibold text-base-content">
+                          <p class="mt-1.5 break-words font-display text-base font-semibold tracking-tight text-base-content">
                             {ing.raw}
                           </p>
                         </div>
                         <div class="flex-1 sm:text-right">
-                          <p class="text-xs font-semibold uppercase tracking-wide text-base-content/60">
+                          <p class="font-mono text-[10px] uppercase tracking-[0.18em] text-base-content/45">
                             Will import as
                           </p>
-                          <div class="mt-1 inline-flex flex-wrap items-baseline gap-x-2 gap-y-1 sm:justify-end">
+                          <div class="mt-1.5 inline-flex flex-wrap items-baseline gap-x-2 gap-y-1 sm:justify-end">
                             <% parts =
                               preview_parts(
                                 ing,
@@ -434,7 +481,7 @@ defmodule InstaMealieWeb.ReviewLive do
                                 @selected_unit[ing.index]
                               ) %>
                             <%= if parts.quantity_unit != "" do %>
-                              <span class="rounded-md bg-base-300/50 px-1.5 py-0.5 font-mono text-sm text-base-content/70">
+                              <span class="rounded-md bg-base-300/40 px-1.5 py-0.5 font-mono text-sm text-base-content/70">
                                 {parts.quantity_unit}
                               </span>
                             <% end %>
@@ -442,40 +489,24 @@ defmodule InstaMealieWeb.ReviewLive do
                               {parts.food}
                             </span>
                             <%= if parts.note != "" do %>
-                              <span class="text-sm text-base-content/50">
-                                , {parts.note}
+                              <span class="text-sm italic text-base-content/50">
+                                {parts.note}
                               </span>
                             <% end %>
-                            <span class={confidence_badge(Ingredient.confidence_band(ing))}>
-                              {confidence_percent_label(Ingredient.confidence_band(ing))}
+                            <span class={confidence_badge(band)}>
+                              <span class="size-1.5 rounded-full bg-current"></span>
+                              {confidence_percent_label(band)}
                             </span>
                           </div>
                         </div>
                         <div class="self-end pt-0 sm:self-auto sm:pt-1">
-                          <.icon
-                            name="hero-chevron-down"
-                            class="size-4 text-base-content/50 transition-transform group-open:rotate-180"
-                          />
+                          <span class="flex size-6 items-center justify-center rounded-full bg-base-200/60 text-base-content/50 transition-transform group-open:rotate-180">
+                            <.icon name="hero-chevron-down" class="size-4" />
+                          </span>
                         </div>
                       </summary>
 
-                      <div class="border-t border-base-300/50 p-4 space-y-4">
-                        <div class="rounded-xl bg-base-200/50 p-3">
-                          <div class="flex items-start gap-3">
-                            <div class="flex-1">
-                              <p class="text-xs font-semibold uppercase tracking-wide text-base-content/60">
-                                Source ingredient
-                              </p>
-                              <p class="mt-1 font-display text-base font-semibold text-base-content">
-                                {ing.raw}
-                              </p>
-                            </div>
-                            <span class={confidence_badge(Ingredient.confidence_band(ing))}>
-                              {confidence_label(Ingredient.confidence_band(ing))}
-                            </span>
-                          </div>
-                        </div>
-
+                      <div class="space-y-4 border-t border-base-300/50 p-4">
                         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                           <div class="space-y-2">
                             <div>
@@ -538,23 +569,25 @@ defmodule InstaMealieWeb.ReviewLive do
                     </details>
                   <% end %>
 
-                  <div class="flex flex-col-reverse sm:flex-row items-start sm:items-center justify-between gap-4 pt-2">
-                    <div class="flex gap-3">
-                      <button
-                        type="submit"
-                        id="import-review-submit"
-                        class="rounded-xl bg-primary px-5 py-3 font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
-                      >
-                        Import to Mealie
-                      </button>
+                  <div class="flex flex-col-reverse items-start sm:flex-row sm:items-center sm:justify-between gap-4 border-t border-base-300/40 pt-5">
+                    <p class="order-2 font-mono text-[11px] uppercase tracking-[0.18em] text-base-content/55 sm:order-1">
+                      {import_summary(@ingredients)}
+                    </p>
+                    <div class="flex flex-wrap gap-3 sm:order-2">
                       <.link
                         navigate={~p"/"}
-                        class="rounded-xl border border-base-300 bg-base-100 px-5 py-3 font-medium text-base-content transition hover:bg-base-200"
+                        class="rounded-xl border border-base-300 bg-base-100 px-4 py-3 text-sm font-medium text-base-content transition hover:bg-base-200 active:scale-[0.98]"
                       >
                         Cancel
                       </.link>
+                      <button
+                        type="submit"
+                        id="import-review-submit"
+                        class="inline-flex items-center gap-1.5 rounded-xl bg-primary px-5 py-3 font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
+                      >
+                        <.icon name="hero-arrow-down-tray" class="size-5" /> Import to Mealie
+                      </button>
                     </div>
-                    <p class="text-sm text-base-content/60">{import_summary(@ingredients)}</p>
                   </div>
                 </.form>
               </div>
@@ -725,14 +758,14 @@ defmodule InstaMealieWeb.ReviewLive do
           phx-change={"search-#{@field}"}
           phx-value-index={@index}
           phx-debounce="300"
-          class="w-full rounded-lg border border-base-300 bg-base-100 py-2 pl-3 pr-10 text-sm text-base-content placeholder:text-base-content/40 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/30"
+          class="w-full rounded-lg border border-base-300 bg-base-100 py-2 pl-3 pr-10 text-sm text-base-content transition placeholder:text-base-content/40 focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/30"
         />
         <button
           type="button"
           tabindex="-1"
           aria-label={@dropdown_aria_label}
           aria-controls={"#{@field}-list-#{@index}"}
-          class="absolute inset-y-0 right-0 flex items-center rounded-r-lg border-l border-base-300 bg-base-100 px-3 text-base-content/60 transition hover:bg-base-200 focus:outline-none focus:ring-2 focus:ring-primary/30"
+          class="absolute inset-y-0 right-0 flex items-center rounded-r-lg border-l border-base-300/70 bg-base-100 px-3 text-base-content/55 transition hover:bg-base-200 hover:text-base-content/80 focus:outline-none focus:ring-2 focus:ring-primary/30"
         >
           <.icon name="hero-chevron-down" class="size-4" />
         </button>
@@ -741,7 +774,7 @@ defmodule InstaMealieWeb.ReviewLive do
       <div
         id={"#{@field}-list-#{@index}"}
         role="listbox"
-        class="hidden absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-base-300 bg-base-100 py-1 shadow-lg"
+        class="hidden absolute z-10 mt-1.5 max-h-60 w-full overflow-auto rounded-lg border border-base-300 bg-base-100 py-1 shadow-lg"
       >
         <% suggested = @suggested %>
         <% search_results =
@@ -755,7 +788,7 @@ defmodule InstaMealieWeb.ReviewLive do
             phx-value-field={@field}
             phx-value-index={@index}
             phx-value-value=""
-            class="cursor-pointer px-3 py-2 text-sm text-base-content/70 hover:bg-base-200 focus:bg-base-200 focus:outline-none"
+            class="cursor-pointer px-3 py-2 text-sm italic text-base-content/70 hover:bg-base-200 focus:bg-base-200 focus:outline-none"
           >
             {@empty_label}
           </div>
@@ -763,8 +796,8 @@ defmodule InstaMealieWeb.ReviewLive do
 
         <%= if suggested != [] do %>
           <div role="group" aria-label="Suggested">
-            <div class="px-3 py-1 text-xs font-medium uppercase tracking-wide text-base-content/50">
-              Suggested
+            <div class="flex items-center gap-1.5 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-base-content/45">
+              <span class="size-1 rounded-full bg-primary/70"></span> Suggested
             </div>
             <%= for cand <- suggested do %>
               <div
@@ -774,7 +807,7 @@ defmodule InstaMealieWeb.ReviewLive do
                 phx-value-field={@field}
                 phx-value-index={@index}
                 phx-value-value={cand}
-                class="cursor-pointer px-3 py-2 text-sm text-base-content hover:bg-base-200 focus:bg-base-200 focus:outline-none"
+                class="cursor-pointer px-3 py-2 text-sm text-base-content hover:bg-primary/10 hover:text-primary-content focus:bg-primary/10 focus:outline-none"
               >
                 {cand}
               </div>
@@ -784,8 +817,8 @@ defmodule InstaMealieWeb.ReviewLive do
 
         <%= if search_results != [] do %>
           <div role="group" aria-label="Search results">
-            <div class="px-3 py-1 text-xs font-medium uppercase tracking-wide text-base-content/50">
-              Search results
+            <div class="flex items-center gap-1.5 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-base-content/45">
+              <span class="size-1 rounded-full bg-base-content/45"></span> Search results
             </div>
             <%= for cand <- search_results do %>
               <div
@@ -922,21 +955,30 @@ defmodule InstaMealieWeb.ReviewLive do
   end
 
   defp confidence_badge(:high),
-    do: "rounded-full bg-success/15 px-2 py-0.5 text-xs font-medium text-success"
+    do:
+      "inline-flex items-center gap-1.5 rounded-full bg-success/15 px-2 py-0.5 text-xs font-medium text-success/85"
 
   defp confidence_badge(:medium),
-    do: "rounded-full bg-warning/15 px-2 py-0.5 text-xs font-medium text-warning"
+    do:
+      "inline-flex items-center gap-1.5 rounded-full bg-warning/15 px-2 py-0.5 text-xs font-medium text-warning/85"
 
   defp confidence_badge(:low),
-    do: "rounded-full bg-error/15 px-2 py-0.5 text-xs font-medium text-error"
+    do:
+      "inline-flex items-center gap-1.5 rounded-full bg-error/15 px-2 py-0.5 text-xs font-medium text-error/85"
 
   defp confidence_badge(:unknown),
-    do: "rounded-full bg-base-300/30 px-2 py-0.5 text-xs font-medium text-base-content/50"
+    do:
+      "inline-flex items-center gap-1.5 rounded-full bg-base-300/40 px-2 py-0.5 text-xs font-medium text-base-content/55"
 
-  defp confidence_label(:high), do: "High"
-  defp confidence_label(:medium), do: "Medium"
-  defp confidence_label(:low), do: "Low"
-  defp confidence_label(:unknown), do: "Unknown"
+  # Border tint encodes confidence at a glance so collapsed rows read like a
+  # heat-map: warm/emergency borders on rows that need eyes, neutral on rows
+  # that are already high-confidence. Needs-review beats band tint when both
+  # are present (the row surfaced because the pipeline flagged it).
+  defp details_border_classes(true, _band), do: "border-warning/40 hover:border-warning/60"
+  defp details_border_classes(false, :low), do: "border-error/40 hover:border-error/60"
+  defp details_border_classes(false, :medium), do: "border-primary/30 hover:border-primary/50"
+  defp details_border_classes(false, :unknown), do: "border-base-300 hover:border-base-300"
+  defp details_border_classes(false, :high), do: "border-base-300/70 hover:border-base-300"
 
   defp initial_food(ing), do: ing.food.name || ing.raw || ""
   defp initial_unit(ing), do: ing.unit.name || ""

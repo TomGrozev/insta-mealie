@@ -121,22 +121,23 @@ defmodule InstaMealie.Ingredient do
           %{ing | index: i}
 
         p ->
-          candidate = %{ing |
-            index: i,
-            raw: ing.raw || ing.note,
-            quantity: p["quantity"],
-            food: %Ref{
-              name: Map.get(p, "food"),
-              id: Map.get(p, "food_id"),
-              confidence: Map.get(p, "food_confidence")
-            },
-            unit: %Ref{
-              name: Map.get(p, "unit"),
-              id: Map.get(p, "unit_id"),
-              confidence: Map.get(p, "unit_confidence")
-            },
-            note: p["note"],
-            average_confidence: Map.get(p, "average_confidence")
+          candidate = %{
+            ing
+            | index: i,
+              raw: ing.raw || ing.note,
+              quantity: p["quantity"],
+              food: %Ref{
+                name: Map.get(p, "food"),
+                id: Map.get(p, "food_id"),
+                confidence: Map.get(p, "food_confidence")
+              },
+              unit: %Ref{
+                name: Map.get(p, "unit"),
+                id: Map.get(p, "unit_id"),
+                confidence: Map.get(p, "unit_confidence")
+              },
+              note: p["note"],
+              average_confidence: Map.get(p, "average_confidence")
           }
 
           %{candidate | status: if(needs_review?(candidate), do: :needs_review, else: :parsed)}
@@ -150,8 +151,14 @@ defmodule InstaMealie.Ingredient do
   Returns true if this ingredient needs human review before import.
 
   An ingredient needs review when:
-  - Either food or unit has no Mealie id, OR
-  - Either food or unit confidence is below 0.85
+  - The food has no Mealie id or its confidence is below 0.85, OR
+  - The ingredient has a unit (detected by a non-blank `unit.name`) but
+    that unit has no Mealie id or its confidence is below 0.85
+
+  Ingredients that legitimately have no unit at all (e.g. `"3 eggs"` —
+  its `unit.name` is nil or blank) are not penalised for missing unit
+  resolution: only ingredients that do have a unit require it to be
+  resolved before they pass review.
 
   Falls back to `average_confidence` when a per-field confidence score
   is absent. Treats "no score and no id" as needs-review.
@@ -159,7 +166,7 @@ defmodule InstaMealie.Ingredient do
   @spec needs_review?(t()) :: boolean()
   def needs_review?(%__MODULE__{} = ing) do
     food_ok = is_binary(ing.food.id) && food_conf_ok?(ing)
-    unit_ok = is_binary(ing.unit.id) && unit_conf_ok?(ing)
+    unit_ok = not has_unit?(ing) or (is_binary(ing.unit.id) && unit_conf_ok?(ing))
     not (food_ok and unit_ok)
   end
 
@@ -174,23 +181,69 @@ defmodule InstaMealie.Ingredient do
   end
 
   @doc """
-  Returns the confidence band for the ingredient's food confidence.
+  Returns the confidence band reflecting the ingredient's overall parse
+  confidence across both food and unit.
 
-  - `:high` — food confidence ≥ 0.95
-  - `:medium` — food confidence ≥ 0.85
-  - `:low` — food confidence < 0.85
-  - `:unknown` — no confidence score available
+  Each field is first bucketed into a band, then the worse of the two
+  applicable bands is returned. Per-field bands:
+
+  - `:high` — confidence ≥ 0.95
+  - `:medium` — confidence ≥ 0.85
+  - `:low` — confidence < 0.85
+  - `:unknown` — no confidence score available for that field
+
+  A field is only bucketed to `:high` or `:medium` when it is actually
+  resolved (has a Mealie id) AND its confidence clears the threshold —
+  this stays in lockstep with `needs_review?/1` so the badge never
+  claims a field is fine when review is required.
+
+  Severity ordering (worst → best): `:low`/`:unknown` > `:medium` > `:high`.
+  `:unknown` is treated as worst-tier **only when the ingredient actually
+  has a unit**, so a unit field that is present but unresolvable can never
+  be papered over by a strong food confidence.
+
+  Ingredients that legitimately have no unit at all (e.g. `"3 eggs"` — its
+  `unit.name` is nil or blank) are not penalised for missing unit
+  confidence; only the food confidence is reported for those lines.
   """
   @spec confidence_band(t()) :: :high | :medium | :low | :unknown
   def confidence_band(%__MODULE__{} = ing) do
-    conf = ing.food.confidence
+    food_band = field_band(ing.food.id, ing.food.confidence || ing.average_confidence)
 
-    cond do
-      is_nil(conf) -> :unknown
-      conf >= 0.95 -> :high
-      conf >= 0.85 -> :medium
-      true -> :low
-    end
+    unit_band =
+      if has_unit?(ing),
+        do: field_band(ing.unit.id, ing.unit.confidence || ing.average_confidence),
+        else: nil
+
+    [food_band, unit_band]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.reduce(&worse/2)
+  end
+
+  # A field can only be `:high`/`:medium` when it's actually resolved (has an
+  # id) AND its confidence clears the threshold — this must stay in lockstep
+  # with `food_conf_ok?/1` / `unit_conf_ok?/1` so the badge never claims a
+  # field is fine when `needs_review?/1` says otherwise.
+  defp field_band(id, conf) when is_binary(id) and is_number(conf) and conf >= 0.95, do: :high
+  defp field_band(id, conf) when is_binary(id) and is_number(conf) and conf >= 0.85, do: :medium
+  defp field_band(id, conf) when is_binary(id) and is_number(conf), do: :low
+  defp field_band(id, _conf) when is_binary(id), do: :unknown
+  defp field_band(_id, conf) when is_number(conf), do: :low
+  defp field_band(_id, _conf), do: :unknown
+
+  defp has_unit?(%__MODULE__{unit: %Ref{name: name}}) when is_binary(name) do
+    String.trim(name) != ""
+  end
+
+  defp has_unit?(_), do: false
+
+  # Higher rank = worse. `:unknown` is only ever passed in here from
+  # `band_for/1` when `has_unit?/1` was true (the unit exemption in
+  # `confidence_band/1` suppresses it otherwise), so it stands in for
+  # "an unresolved required field" and ranks alongside `:low`.
+  defp worse(a, b) do
+    rank = %{high: 1, medium: 2, low: 3, unknown: 3}
+    if rank[b] >= rank[a], do: b, else: a
   end
 
   @doc """
@@ -217,13 +270,14 @@ defmodule InstaMealie.Ingredient do
           food_name = if(food && food != "", do: food)
           unit_name = if(unit && unit != "", do: unit)
 
-          food_id = res["food_id"] || (if food_name == ing.food.name, do: ing.food.id)
-          unit_id = res["unit_id"] || (if unit_name == ing.unit.name, do: ing.unit.id)
+          food_id = res["food_id"] || if food_name == ing.food.name, do: ing.food.id
+          unit_id = res["unit_id"] || if unit_name == ing.unit.name, do: ing.unit.id
 
-          %{ing |
-            food: %Ref{name: food_name, id: food_id, confidence: nil},
-            unit: %Ref{name: unit_name, id: unit_id, confidence: nil},
-            status: :resolved
+          %{
+            ing
+            | food: %Ref{name: food_name, id: food_id, confidence: nil},
+              unit: %Ref{name: unit_name, id: unit_id, confidence: nil},
+              status: :resolved
           }
 
         _ ->

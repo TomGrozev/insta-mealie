@@ -6,7 +6,7 @@ defmodule InstaMealieWeb.JobsLive do
   alias InstaMealie.PubSub
 
   @topic "jobs"
-  @stages_order [:fetch, :transcribe, :llm_format, :llm_merge, :mealie_import]
+  @stages_order [:fetch, :llm_format, :transcribe, :llm_merge, :mealie_import]
 
   @impl true
   def mount(_params, _session, socket) do
@@ -141,22 +141,33 @@ defmodule InstaMealieWeb.JobsLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash}>
-      <section class="space-y-5">
-        <div class="space-y-2">
+      <section class="space-y-6">
+        <div class="space-y-2.5">
+          <div class="flex items-center gap-2">
+            <span class="h-px w-6 bg-primary/60"></span>
+            <span class="font-mono text-[10px] uppercase tracking-[0.22em] text-base-content/45">
+              Reel → Mealie
+            </span>
+          </div>
           <h1 class="font-display text-3xl font-semibold tracking-tight text-base-content sm:text-4xl">
             From reel to recipe.
           </h1>
-          <p class="max-w-xl text-base-content/70">
+          <p class="max-w-xl text-[15px] leading-relaxed text-base-content/70">
             Paste an Instagram reel URL and InstaMealie pulls the recipe out of it — then sends it to Mealie.
           </p>
         </div>
 
         <%= if @degraded do %>
-          <div class="rounded-2xl border border-warning/30 bg-warning/10 p-4 text-sm">
-            <p class="font-medium text-warning">Caption-only mode</p>
-            <p class="mt-1 text-base-content/70">
-              yt-dlp browser impersonation is unavailable here, so reel fetching is off. Paste a caption to import without the video.
-            </p>
+          <div class="flex gap-3 rounded-2xl border border-warning/30 bg-warning/10 p-4">
+            <span class="mt-0.5 shrink-0 text-warning">
+              <.icon name="hero-exclamation-triangle" class="size-5" />
+            </span>
+            <div class="min-w-0 flex-1 space-y-1 text-sm">
+              <p class="font-medium text-warning">Caption-only mode</p>
+              <p class="text-base-content/70">
+                yt-dlp browser impersonation is unavailable here, so reel fetching is off. Paste a caption to import without the video.
+              </p>
+            </div>
           </div>
 
           <.form
@@ -165,14 +176,19 @@ defmodule InstaMealieWeb.JobsLive do
             phx-submit="create-caption"
             class="flex flex-col gap-2 sm:flex-row sm:items-start"
           >
-            <.input
-              field={@caption_form[:caption]}
-              name="caption"
-              type="textarea"
-              rows="3"
-              placeholder="Paste the reel caption…"
-              class="w-full rounded-xl border border-base-300 bg-base-200 px-4 py-3 text-base-content placeholder:text-base-content/40 focus:border-primary focus:ring-2 focus:ring-primary/30"
-            />
+            <div class="relative flex-1">
+              <.input
+                field={@caption_form[:caption]}
+                name="caption"
+                type="textarea"
+                rows="3"
+                placeholder="Paste the reel caption…"
+                class="w-full rounded-xl border border-base-300 bg-base-200/70 px-4 py-3 pl-12 text-base-content placeholder:text-base-content/40 transition focus:border-primary focus:ring-2 focus:ring-primary/30"
+              />
+              <span class="pointer-events-none absolute left-3.5 top-3.5 text-primary/60">
+                <.icon name="hero-chat-bubble-left-right" class="size-5" />
+              </span>
+            </div>
             <button
               type="submit"
               class="shrink-0 rounded-xl bg-primary px-5 py-3 font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
@@ -196,73 +212,79 @@ defmodule InstaMealieWeb.JobsLive do
                 field={@form[:url]}
                 type="url"
                 placeholder="https://instagram.com/reel/..."
-                class="w-full rounded-xl border border-base-300 bg-base-200 px-4 py-3 pl-11 text-base-content placeholder:text-base-content/40 focus:border-primary focus:ring-2 focus:ring-primary/30"
+                class="w-full rounded-xl border border-base-300 bg-base-200/70 px-4 py-3 pl-12 text-base-content placeholder:text-base-content/40 transition focus:border-primary focus:ring-2 focus:ring-primary/30"
               />
-              <span class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-base-content/40">
+              <span class="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-primary/60">
                 <.icon name="hero-link" class="size-5" />
               </span>
             </div>
             <button
               type="submit"
-              class="shrink-0 rounded-xl bg-primary px-5 py-3 font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
+              class="shrink-0 inline-flex items-center justify-center gap-1.5 rounded-xl bg-primary px-5 py-3 font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
             >
-              Create job
+              Create job <.icon name="hero-arrow-right" class="size-4 opacity-80" />
             </button>
           </.form>
 
           <%= if @form_error do %>
-            <p class="text-sm text-error">{@form_error}</p>
+            <p class="flex items-center gap-1.5 text-sm text-error">
+              <.icon name="hero-exclamation-circle" class="size-4" />
+              {@form_error}
+            </p>
           <% end %>
         <% end %>
 
         <%= if @duplicate_warning do %>
-          <div class="rounded-2xl border border-warning/40 bg-warning/10 p-4">
-            <div class="flex flex-wrap items-start justify-between gap-3">
-              <div class="min-w-0 flex-1 space-y-1">
-                <p class="text-sm font-semibold text-warning">
-                  A job for this URL already exists.
-                </p>
-                <p class="text-xs text-base-content/60">
-                  {duplicate_warning_detail(@duplicate_warning)}
-                </p>
-                <div class="mt-2 flex flex-wrap gap-2">
-                  <%= if @duplicate_warning.deep_link do %>
-                    <a
-                      id="duplicate-deep-link"
-                      href={@duplicate_warning.deep_link}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      class="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-content transition hover:opacity-90"
-                    >
-                      View in Mealie <.icon name="hero-arrow-top-right-on-square" class="inline size-4" />
-                    </a>
-                  <% end %>
-                  <button
-                    id="force-import"
-                    type="button"
-                    phx-click="force-import"
-                    class="rounded-lg border border-base-300 bg-base-100 px-3 py-1.5 text-sm font-medium text-base-content transition hover:bg-base-200 active:scale-[0.98]"
+          <div class="flex gap-3 rounded-2xl border border-warning/40 bg-warning/10 p-4">
+            <span class="mt-0.5 shrink-0 text-warning">
+              <.icon name="hero-arrow-path-rounded-square" class="size-5" />
+            </span>
+            <div class="min-w-0 flex-1 space-y-2">
+              <p class="text-sm font-semibold text-warning">
+                A job for this URL already exists.
+              </p>
+              <p class="text-xs text-base-content/60">
+                {duplicate_warning_detail(@duplicate_warning)}
+              </p>
+              <div class="flex flex-wrap gap-2">
+                <%= if @duplicate_warning.deep_link do %>
+                  <a
+                    id="duplicate-deep-link"
+                    href={@duplicate_warning.deep_link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-content transition hover:opacity-90"
                   >
-                    Import anyway
-                  </button>
-                </div>
+                    View in Mealie <.icon name="hero-arrow-top-right-on-square" class="size-4" />
+                  </a>
+                <% end %>
+                <button
+                  id="force-import"
+                  type="button"
+                  phx-click="force-import"
+                  class="rounded-lg border border-base-300 bg-base-100 px-3 py-1.5 text-sm font-medium text-base-content transition hover:bg-base-200 active:scale-[0.98]"
+                >
+                  Import anyway
+                </button>
               </div>
             </div>
           </div>
         <% end %>
 
-        <div class="rounded-2xl border border-base-300/60 bg-base-200/40 p-4">
-          <p class="mb-3 text-xs font-medium uppercase tracking-wider text-base-content/45">
-            The pipeline
+        <div class="border-t border-base-300/50 pt-5 sm:pt-6">
+          <p class="mb-4 font-mono text-[10px] uppercase tracking-[0.18em] text-base-content/45">
+            The pipeline · 5 stages
           </p>
-          <.pipeline_strip stages={%{}} ghost={true} />
+          <.pipeline_strip stages={%{}} ghost={true} show_labels={true} />
         </div>
       </section>
 
       <section class="space-y-3">
-        <h2 class="text-xs font-semibold uppercase tracking-wider text-base-content/50">
-          Recent jobs
-        </h2>
+        <div class="flex items-center justify-between">
+          <h2 class="font-mono text-[10px] uppercase tracking-[0.22em] text-base-content/50">
+            Recent jobs
+          </h2>
+        </div>
 
         <div id="jobs" phx-update="stream" class="space-y-3">
           <div :for={{id, job} <- @streams.jobs} id={id}>
@@ -275,9 +297,15 @@ defmodule InstaMealieWeb.JobsLive do
         </div>
 
         <%= if @jobs_empty? do %>
-          <p class="rounded-2xl border border-dashed border-base-300 bg-base-200/30 p-6 text-center text-sm text-base-content/50">
-            No jobs yet — paste a reel URL above to begin.
-          </p>
+          <div class="flex flex-col items-center gap-2 rounded-2xl border border-dashed border-base-300/80 bg-base-200/30 px-6 py-10 text-center">
+            <span class="flex size-10 items-center justify-center rounded-full bg-primary/10 text-primary/70">
+              <.icon name="hero-camera" class="size-5" />
+            </span>
+            <p class="text-sm font-medium text-base-content/70">No jobs yet</p>
+            <p class="max-w-xs text-xs text-base-content/50">
+              Paste a reel URL above and InstaMealie will pull the recipe out of it.
+            </p>
+          </div>
         <% end %>
       </section>
     </Layouts.app>
@@ -286,15 +314,26 @@ defmodule InstaMealieWeb.JobsLive do
 
   attr :stages, :map, default: %{}
   attr :ghost, :boolean, default: false
+  attr :show_labels, :boolean, default: true
 
   def pipeline_strip(assigns) do
-    assigns = assign(assigns, :stages_order, @stages_order)
+    stages_order = @stages_order
+
+    stages_with_status =
+      Enum.map(stages_order, fn stage ->
+        status = if assigns.ghost, do: :ghost, else: Map.get(assigns.stages, stage, :pending)
+        {stage, status}
+      end)
+
+    assigns =
+      assigns
+      |> assign(:stages_order, stages_order)
+      |> assign(:stages_with_status, stages_with_status)
 
     ~H"""
     <div class="space-y-1.5">
       <div class="flex items-center">
-        <%= for {stage, idx} <- Enum.with_index(@stages_order) do %>
-          <% status = if @ghost, do: :ghost, else: Map.get(@stages, stage, :pending) %>
+        <%= for {{stage, status}, idx} <- Enum.with_index(@stages_with_status) do %>
           <div
             data-stage={stage}
             class={node_classes(status)}
@@ -319,16 +358,21 @@ defmodule InstaMealieWeb.JobsLive do
           <% end %>
         <% end %>
       </div>
-      <div class="flex">
-        <%= for {stage, idx} <- Enum.with_index(@stages_order) do %>
-          <div class="flex-1 text-center text-[10px] font-medium uppercase tracking-wide text-base-content/45">
-            {stage_label(stage)}
-          </div>
-          <%= if idx < length(@stages_order) - 1 do %>
-            <div class="flex-1"></div>
+      <%= if @show_labels do %>
+        <div class="flex">
+          <%= for {{stage, status}, idx} <- Enum.with_index(@stages_with_status) do %>
+            <div class={[
+              "flex-1 text-center font-mono text-[10px] uppercase tracking-wide text-base-content/45",
+              status == :skipped && "line-through opacity-60"
+            ]}>
+              {stage_label(stage)}
+            </div>
+            <%= if idx < length(@stages_order) - 1 do %>
+              <div class="flex-1"></div>
+            <% end %>
           <% end %>
-        <% end %>
-      </div>
+        </div>
+      <% end %>
     </div>
     """
   end
@@ -336,13 +380,27 @@ defmodule InstaMealieWeb.JobsLive do
   def job_card(assigns) do
     ~H"""
     <% actions = Pipeline.available_actions(@job) %>
-    <div class="rounded-2xl border border-base-300/70 bg-base-200/50 p-4 shadow-sm transition hover:border-base-300">
+    <div class={[
+      "group relative rounded-2xl border bg-base-100/60 p-4 shadow-sm transition hover:bg-base-100",
+      card_border_classes(@job)
+    ]}>
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
-          <p class="truncate text-sm font-medium text-base-content">
-            {@job.url || @job.caption || "Job #{@job.id}"}
+          <p class="truncate font-display text-base font-semibold tracking-tight text-base-content">
+            {job_title(@job)}
           </p>
-          <p class="mt-0.5 text-xs text-base-content/50">{verdict_text(@job)}</p>
+          <p class={["mt-1 flex items-center gap-1.5 text-xs", verdict_text_classes(@job)]}>
+            <span class="size-1.5 rounded-full bg-current"></span>
+            {verdict_text(@job)}
+          </p>
+          <%= if missing_instructions?(@job) do %>
+            <span
+              class="mt-1.5 inline-flex items-center gap-1 rounded-md border border-warning/30 bg-warning/10 px-1.5 py-0.5 text-[11px] font-medium text-warning/85"
+              title="Recipe was imported, but it has no cooking instructions — you may want to add them in Mealie."
+            >
+              <.icon name="hero-exclamation-triangle" class="size-3" /> No instructions found
+            </span>
+          <% end %>
         </div>
 
         <%= if @job.state == :succeeded and @job.deep_link do %>
@@ -351,9 +409,9 @@ defmodule InstaMealieWeb.JobsLive do
             href={@job.deep_link}
             target="_blank"
             rel="noopener noreferrer"
-            class="shrink-0 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-content transition hover:opacity-90"
+            class="shrink-0 inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-content transition hover:opacity-90"
           >
-            Open in Mealie <.icon name="hero-arrow-top-right-on-square" class="inline size-4" />
+            Open in Mealie <.icon name="hero-arrow-top-right-on-square" class="size-4" />
           </a>
         <% end %>
 
@@ -361,40 +419,43 @@ defmodule InstaMealieWeb.JobsLive do
           <.link
             navigate={~p"/jobs/#{@job.id}/review"}
             id={"review-#{@job.id}"}
-            class="shrink-0 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-content transition hover:opacity-90"
+            class="shrink-0 inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-content transition hover:opacity-90"
           >
-            Review ingredients
+            Review ingredients <.icon name="hero-arrow-right" class="size-4" />
           </.link>
         <% end %>
       </div>
 
-      <div class="mt-3">
+      <div class="mt-3.5">
         <.pipeline_strip stages={@job.stages} />
       </div>
 
       <%= if :cancel in actions do %>
-        <div class="mt-2 flex justify-end">
+        <div class="mt-3 flex justify-end">
           <button
             id={"cancel-#{@job.id}"}
             type="button"
             phx-click="cancel_job"
             phx-value-job_id={@job.id}
-            class="rounded-lg border border-base-300 bg-base-100 px-3 py-1.5 text-sm font-medium text-error transition hover:bg-error/10 active:scale-[0.98]"
+            class="inline-flex items-center gap-1.5 rounded-lg border border-base-300 bg-base-100 px-3 py-1.5 text-sm font-medium text-error transition hover:bg-error/10 active:scale-[0.98]"
           >
-            Cancel
+            <.icon name="hero-x-mark" class="size-4" /> Cancel
           </button>
         </div>
       <% end %>
 
       <%= if @job.state == :failed do %>
-        <div class="mt-3">
+        <div class="mt-4 border-t border-base-300/40 pt-3">
           <div class={[
-            "flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2",
+            "flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2.5",
             banner_classes(@job)
           ]}>
-            <span class="text-sm font-semibold">{stage_label(@job.error_stage)} failed</span>
+            <span class="flex items-center gap-1.5 text-sm font-semibold">
+              <.icon name="hero-exclamation-circle" class="size-4" />
+              {stage_label(@job.error_stage)} failed
+            </span>
             <span class="flex items-center gap-2">
-              <span class="rounded-full bg-base-100/70 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-base-content/70">
+              <span class="rounded-full bg-base-100/70 px-2 py-0.5 font-mono text-[11px] font-semibold uppercase tracking-wide text-base-content/70">
                 {to_string(@job.error_class)}
               </span>
               <span class="group relative inline-flex">
@@ -424,15 +485,16 @@ defmodule InstaMealieWeb.JobsLive do
           <% else %>
             <p class="mt-2 text-xs text-base-content/60">{cta_explainer(@job, actions)}</p>
 
-            <div class="mt-2 flex flex-wrap gap-2">
+            <div class="mt-2.5 flex flex-wrap gap-2">
               <%= if :retry in actions do %>
                 <button
                   id={"retry-#{@job.id}"}
                   type="button"
                   phx-click="retry"
                   phx-value-job-id={@job.id}
-                  class="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
+                  class="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-content transition hover:opacity-90 active:scale-[0.98]"
                 >
+                  <.icon name="hero-arrow-path" class="size-4" />
                   Retry ({Pipeline.retries_left(@job)} left)
                 </button>
               <% end %>
@@ -443,9 +505,9 @@ defmodule InstaMealieWeb.JobsLive do
                   type="button"
                   phx-click="paste-caption"
                   phx-value-job-id={@job.id}
-                  class="rounded-lg border border-base-300 bg-base-100 px-3 py-1.5 text-sm font-medium text-base-content transition hover:bg-base-200 active:scale-[0.98]"
+                  class="inline-flex items-center gap-1.5 rounded-lg border border-base-300 bg-base-100 px-3 py-1.5 text-sm font-medium text-base-content transition hover:bg-base-200 active:scale-[0.98]"
                 >
-                  Paste caption
+                  <.icon name="hero-clipboard-document" class="size-4" /> Paste caption
                 </button>
               <% end %>
 
@@ -455,8 +517,9 @@ defmodule InstaMealieWeb.JobsLive do
                   type="button"
                   phx-click="transcribe-anyway"
                   phx-value-job-id={@job.id}
-                  class="rounded-lg border border-base-300 bg-base-100 px-3 py-1.5 text-sm font-medium text-base-content transition hover:bg-base-200 active:scale-[0.98]"
+                  class="inline-flex items-center gap-1.5 rounded-lg border border-base-300 bg-base-100 px-3 py-1.5 text-sm font-medium text-base-content transition hover:bg-base-200 active:scale-[0.98]"
                 >
+                  <.icon name="hero-document-text" class="size-4" />
                   {transcribe_cta_label(@job)}
                 </button>
               <% end %>
@@ -468,7 +531,7 @@ defmodule InstaMealieWeb.JobsLive do
                 id={"paste-caption-form-#{@job.id}"}
                 phx-submit="submit-caption"
                 phx-value-job-id={@job.id}
-                class="mt-2"
+                class="mt-2 rounded-lg border border-base-300/60 bg-base-200/40 p-3"
               >
                 <.input
                   field={@caption_form[:caption]}
@@ -478,7 +541,7 @@ defmodule InstaMealieWeb.JobsLive do
                   placeholder="Paste the reel caption…"
                   class="w-full rounded-lg border border-base-300 bg-base-100 px-3 py-2 text-sm text-base-content placeholder:text-base-content/40 focus:border-primary focus:ring-2 focus:ring-primary/30"
                 />
-                <div class="mt-1 flex gap-2">
+                <div class="mt-2 flex gap-2">
                   <button
                     type="submit"
                     class="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-content transition hover:opacity-90"
@@ -520,6 +583,30 @@ defmodule InstaMealieWeb.JobsLive do
       "bg-error/10 text-error"
     end
   end
+
+  # Per-card presentation helpers — pure color/skin mapping from job state.
+
+  defp card_border_classes(%{state: :needs_review}),
+    do: "border-primary/40 hover:border-primary/60"
+
+  defp card_border_classes(%{state: :succeeded}), do: "border-success/40 hover:border-success/60"
+
+  defp card_border_classes(%{state: :failed} = job) do
+    if Pipeline.dead?(job),
+      do: "border-base-300/70",
+      else: "border-error/40 hover:border-error/60"
+  end
+
+  defp card_border_classes(_), do: "border-base-300/70 hover:border-base-300"
+
+  defp verdict_text_classes(%{state: :succeeded}), do: "text-success/80"
+  defp verdict_text_classes(%{state: :needs_review}), do: "text-primary/80"
+
+  defp verdict_text_classes(%{state: :failed} = job) do
+    if Pipeline.dead?(job), do: "text-base-content/45", else: "text-error/85"
+  end
+
+  defp verdict_text_classes(_), do: "text-base-content/55"
 
   defp cta_explainer(job, actions) do
     case job.error_stage do
@@ -567,7 +654,7 @@ defmodule InstaMealieWeb.JobsLive do
 
   defp node_classes(:skipped),
     do:
-      "flex size-7 shrink-0 items-center justify-center rounded-full bg-base-300 text-base-content/40"
+      "flex size-7 shrink-0 items-center justify-center rounded-full border-2 border-dashed border-base-content/30 bg-base-200/70 text-base-content/55"
 
   defp node_classes(:ghost),
     do:
@@ -578,6 +665,7 @@ defmodule InstaMealieWeb.JobsLive do
       "flex size-7 shrink-0 items-center justify-center rounded-full bg-base-300 text-base-content/40"
 
   defp connector_classes(:done), do: "h-0.5 flex-1 rounded-full bg-primary"
+  defp connector_classes(:skipped), do: "h-0.5 flex-1 rounded-full bg-primary"
   defp connector_classes(:ghost), do: "h-0.5 flex-1 rounded-full bg-base-300/70"
   defp connector_classes(_), do: "h-0.5 flex-1 rounded-full bg-base-300"
 
@@ -594,6 +682,26 @@ defmodule InstaMealieWeb.JobsLive do
   defp verdict_text(%{state: :created}), do: "Queued"
   defp verdict_text(%{state: :caption_pasting}), do: "Awaiting caption"
   defp verdict_text(_), do: "Working…"
+
+  # Surface a soft warning on terminal jobs whose recipe extracted without
+  # cooking instructions. Informational only — does not gate the CTAs above.
+  defp missing_instructions?(%{state: state, recipe: %{instructions: instructions}})
+       when state in [:succeeded, :needs_review] and (is_nil(instructions) or instructions == []) do
+    true
+  end
+
+  defp missing_instructions?(_), do: false
+
+  # Prefer the recipe name once one is available (caption extraction / LLM
+  # merge may set it before the import completes), falling back to the raw
+  # URL, then the pasted caption, then a "Job N" placeholder when nothing
+  # is set yet.
+  defp job_title(%{recipe: %{name: name}}) when is_binary(name) and name != "",
+    do: name
+
+  defp job_title(%{url: url}) when is_binary(url) and url != "", do: url
+  defp job_title(%{caption: caption}) when is_binary(caption) and caption != "", do: caption
+  defp job_title(%{id: id}), do: "Job #{id}"
 
   # ---- Duplicate URL warning ----
 
@@ -620,6 +728,9 @@ defmodule InstaMealieWeb.JobsLive do
   defp state_label(:queued), do: "queued"
   defp state_label(:created), do: "starting"
   defp state_label(:needs_review), do: "waiting for ingredient review"
-  defp state_label(state) when is_atom(state), do: state |> to_string() |> String.replace("_", " ")
+
+  defp state_label(state) when is_atom(state),
+    do: state |> to_string() |> String.replace("_", " ")
+
   defp state_label(_), do: "in progress"
 end

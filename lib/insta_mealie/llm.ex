@@ -360,6 +360,7 @@ defmodule InstaMealie.LLM do
     - `missing_fields` may ONLY contain "recipeIngredient" or "recipeInstructions". Leave it empty [] when completeness is "recipe_complete" or "no_recipe".
     - On "no_recipe", the "recipe" MUST be an empty object {}. Do NOT invent a recipe name.
     - On "recipe_complete", include ALL fields: name, description, recipeYield, recipeIngredient (list of strings), recipeInstructions (list of objects with "text" key), tags (list of strings), and optionally totalTime, prepTime, cookTime, performTime as ISO-8601 durations.
+    - Each `recipeIngredient` entry must be exactly ONE ingredient. Never combine multiple ingredients into a single entry using "+", "and", or a comma — split them into separate list entries instead (e.g. "Melted dark chocolate + 1 tsp coconut oil" becomes "Melted dark chocolate" and "1 tsp coconut oil").
     - On "recipe_partial", include whatever fields ARE present; leave missing ones out of the recipe object.
     - Preserve original recipe terms (e.g. ingredient names, technique names). Translate only the surrounding descriptive text if the output language differs from the caption's language.
     - Use string keys for all recipe fields (Mealie expects strings).
@@ -427,6 +428,7 @@ defmodule InstaMealie.LLM do
     - Do NOT invent a recipe name unless the transcript or caption provides one.
     - `completeness` must be one of: "recipe_complete", "recipe_partial", "no_recipe".
     - `missing_fields` may ONLY contain "recipeIngredient" or "recipeInstructions". Leave it empty [] when completeness is "recipe_complete".
+    - Each `recipeIngredient` entry must be exactly ONE ingredient. Never combine multiple ingredients into a single entry using "+", "and", or a comma — split them into separate list entries instead (e.g. "Melted dark chocolate + 1 tsp coconut oil" becomes "Melted dark chocolate" and "1 tsp coconut oil").
     - Preserve original recipe terms. Translate only the surrounding descriptive text if the output language differs from the source language.
     - Use string keys for all recipe fields.
     - tags should capture relevant recipe categories inferred from the content.
