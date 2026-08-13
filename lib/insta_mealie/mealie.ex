@@ -98,8 +98,8 @@ defmodule InstaMealie.Mealie do
     slug = slugify(name)
 
     with :ok <- maybe_create_recipe(slug, name),
-         {:ok, ^slug} <- patch_recipe(slug, recipe) do
-      upload_image(slug, recipe.image)
+         {:ok, ^slug} <- patch_recipe(slug, recipe),
+         :ok <- upload_image(slug, recipe.image) do
       {:ok, slug, deep_link(slug)}
     else
       {:error, %Error{} = error} ->
@@ -314,8 +314,8 @@ defmodule InstaMealie.Mealie do
       resp =
         Req.put!(url,
           headers: auth_headers(),
-          form: [
-            image: {:file, path},
+          form_multipart: [
+            image: {File.stream!(path, 64 * 1024, []), filename: Path.basename(path)},
             extension: Path.extname(path) |> String.trim_leading(".")
           ]
         )

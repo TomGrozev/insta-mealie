@@ -271,4 +271,99 @@ defmodule InstaMealie.PipelineTest do
       assert has_element?(view, "[data-stage=llm_merge]")
     end
   end
+
+  # ── Regression test for issue #38 ──────────────────────────────────
+  #
+  # The fetched reel thumbnail must reach Mealie's image upload endpoint
+  # end-to-end. Today it does NOT, because:
+  #
+  #   1. The fetch stage reads `:thumbnail` from the fetch result, but
+  #      `YtDlp.fetch_metadata/2` returns `:thumbnail_path`. The key
+  #      mismatch silently drops the thumbnail before it can be attached
+  #      to the recipe.
+  #
+  #   2. Even if the key were fixed, the `llm_format` stage replaces the
+  #      job's recipe wholesale (`Pipeline.transition(state.job, [...,
+  #      {:recipe, envelope.recipe}, ...])`) and the LLM response does
+  #      not carry an `image` field — so the thumbnail is lost across
+  #      the recipe replacement and never reaches `upload_image/2`.
+  #
+  # This test exercises the real pipeline seam (YtDlp -> LLM ->
+  # `Mealie.import_recipe/1` -> `upload_image/2`) using the existing
+  # `InstaMealie.TestCase` setup and the env-stored `:mealie_http_adapter`
+  # already used by every other pipeline test. It stubs `fetch_metadata`
+  # with the real `:thumbnail_path` key, lets the default LLM mock emit a
+  # recipe WITHOUT an `image` field (so loss across the LLM replacement
+  # is observable), and asserts the image-upload adapter call is made.
+  #
+  # The test currently fails: no `:image_upload` message is ever sent,
+  # because the buggy code never sets `recipe.image` from the fetch
+  # result, so `Mealie.upload_image/2` short-circuits on `is_nil(image)`.
+
+  describe "thumbnail upload (issue #38 regression)" do
+    test "fetched :thumbnail_path reaches Mealie's image upload endpoint despite LLM recipe replacement" do
+      Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
+      test_pid = self()
+      thumbnail_url = "https://example.com/reel-thumb.jpg"
+
+      # Wrap the existing :mealie_http_adapter (set up by InstaMealie.TestCase)
+      # to capture image-upload calls. Everything else passes through so the
+      # rest of the pipeline behaves identically.
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(
+        :insta_mealie,
+        :mealie_http_adapter,
+        fn m, p, body ->
+          cond do
+            m == :post and String.starts_with?(p, "/api/recipes/") and
+                String.ends_with?(p, "/image") ->
+              send(test_pid, {:image_upload, m, p, body})
+              {:ok, %{}}
+
+            true ->
+              prev.(m, p, body)
+          end
+        end
+      )
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          v -> Application.put_env(:insta_mealie, :mealie_http_adapter, v)
+        end
+      end)
+
+      # Stub YtDlp.fetch_metadata to return the REAL key (:thumbnail_path) with
+      # a deterministic thumbnail URL. The default LLM mock returns a recipe
+      # that omits "image", so if the fetch stage attaches the thumbnail and
+      # the LLM then replaces the recipe, the only way an image upload can
+      # still happen is by preserving/re-attaching the thumbnail across the
+      # LLM replacement.
+      Mox.stub(InstaMealie.YtDlp.Mock, :fetch_metadata, fn _url, _opts ->
+        {:ok,
+         %{
+           author: "chef_og",
+           caption: "Homemade Granola\nMakes about 8 servings.",
+           comments: [],
+           thumbnail_path: thumbnail_url,
+           fetch_dir: "/tmp/insta_mealie/fetch_thumb"
+         }}
+      end)
+
+      assert {:ok, id} =
+               Pipeline.create_job(%{url: "https://instagram.com/reel/thumb-issue-38"})
+
+      assert_receive {:job_updated, %Job{id: ^id, state: :succeeded}}, 5000
+
+      # The fetched :thumbnail_path must reach Mealie's image endpoint despite
+      # the LLM format replacing the recipe. Catches both the key mismatch
+      # (pipeline/job.ex reads :thumbnail, not :thumbnail_path) and the loss
+      # across the LLM recipe replacement.
+      assert_receive {:image_upload, _method, path, body}, 1000
+      assert String.starts_with?(path, "/api/recipes/")
+      assert String.ends_with?(path, "/image")
+      assert body == %{url: thumbnail_url}
+    end
+  end
 end

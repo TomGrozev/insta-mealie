@@ -346,7 +346,7 @@ defmodule InstaMealie.Pipeline.Job do
         changes = [{:stage, :fetch, :done}]
 
         changes =
-          case Map.get(fetch, :thumbnail) do
+          case Map.get(fetch, :thumbnail_path) do
             path when is_binary(path) and path != "" ->
               recipe = state.job.recipe || Recipe.empty()
               changes ++ [{:recipe, %{recipe | image: path}}]
@@ -424,7 +424,7 @@ defmodule InstaMealie.Pipeline.Job do
           job =
             Pipeline.transition(state.job, [
               {:stage, :llm_format, :done},
-              {:recipe, envelope.recipe},
+              {:recipe, preserve_recipe_image(envelope.recipe, state.job.recipe)},
               {:verdict, envelope.completeness},
               {:missing_fields, envelope.missing_fields}
             ])
@@ -591,7 +591,7 @@ defmodule InstaMealie.Pipeline.Job do
           job =
             Pipeline.transition(state.job, [
               {:stage, :llm_merge, :done},
-              {:recipe, envelope.recipe}
+              {:recipe, preserve_recipe_image(envelope.recipe, state.job.recipe)}
             ])
 
           case Recipe.validate(job.recipe) do
@@ -1126,6 +1126,19 @@ defmodule InstaMealie.Pipeline.Job do
   end
 
   defp maybe_fallback_image(recipe, _linked), do: recipe
+
+  # When a later LLM stage replaces the recipe wholesale with an envelope that
+  # doesn't carry an `image` (the LLM prompts don't ask for one), retain a
+  # previously captured image — reel thumbnail from :fetch, or the linked-
+  # recipe fallback applied by `stamp_provenance/3` — on the new `%Recipe{}`.
+  # Mirrors the existing pattern of `maybe_fallback_image/2`: never overwrites
+  # an image the newer recipe supplies itself.
+  defp preserve_recipe_image(%Recipe{image: nil} = new, %Recipe{image: img})
+       when is_binary(img) and img != "" do
+    %{new | image: img}
+  end
+
+  defp preserve_recipe_image(%Recipe{} = new, _previous), do: new
 
   # Runs inside the scrape_link Task: try candidates in order, first success wins.
   # Returns `{:ok, {url, recipe}}` for the first candidate that scrapes, or
