@@ -55,6 +55,35 @@ defmodule InstaMealie.Mealie do
   end
 
   @doc """
+  Scrape a recipe URL via Mealie's test-scrape-url endpoint and return the
+  parsed recipe without creating anything in Mealie.
+
+  Wraps `POST /api/recipes/test-scrape-url`, which uses recipe-scrapers
+  (with site-specific parsers and a wild-mode fallback) to parse a
+  recipe page and return its schema.org/Recipe JSON-LD content.
+
+  Returns `{:ok, %Recipe{}}` on success, or `{:error, %Error{}}` on
+  failure (e.g. a 400 when the URL is not scrapeable, or a 408 timeout).
+  No retry or candidate-list logic happens here — that orchestration
+  belongs to the pipeline stage that calls this function.
+  """
+  @spec scrape_url(String.t()) :: {:ok, Recipe.t()} | {:error, Error.t()}
+  def scrape_url(url) when is_binary(url) do
+    case request(:post, "/api/recipes/test-scrape-url", %{"url" => url, "useOpenAI" => false}) do
+      {:ok, body} when is_map(body) ->
+        Logger.info("[mealie] POST /api/recipes/test-scrape-url -> ok")
+        {:ok, Recipe.from_map(body)}
+
+      {:error, %Error{} = error} ->
+        Logger.error(
+          "[mealie] POST /api/recipes/test-scrape-url failed (#{error.class}: #{error.summary})"
+        )
+
+        {:error, error}
+    end
+  end
+
+  @doc """
   Import a recipe. Reuses an existing draft with the same slug if one exists,
   otherwise creates it.
 

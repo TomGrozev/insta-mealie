@@ -22,7 +22,8 @@ defmodule InstaMealie.Recipe do
           prep_time: String.t() | nil,
           cook_time: String.t() | nil,
           perform_time: String.t() | nil,
-          image: String.t() | nil
+          image: String.t() | nil,
+          source_url: String.t() | nil
         }
 
   defstruct name: nil,
@@ -37,7 +38,8 @@ defmodule InstaMealie.Recipe do
             prep_time: nil,
             cook_time: nil,
             perform_time: nil,
-            image: nil
+            image: nil,
+            source_url: nil
 
   @payload_fields [
     {:name, "name"},
@@ -51,7 +53,8 @@ defmodule InstaMealie.Recipe do
     {:total_time, "totalTime"},
     {:prep_time, "prepTime"},
     {:cook_time, "cookTime"},
-    {:perform_time, "performTime"}
+    {:perform_time, "performTime"},
+    {:source_url, "orgURL"}
   ]
 
   @doc """
@@ -66,7 +69,8 @@ defmodule InstaMealie.Recipe do
       name: InstaMealie.Utils.map_get(data, "name"),
       description: InstaMealie.Utils.map_get(data, "description"),
       recipe_yield: InstaMealie.Utils.map_get(data, "recipeYield"),
-      ingredients: (InstaMealie.Utils.map_get(data, "recipeIngredient") || []) |> Ingredient.from_list(),
+      ingredients:
+        (InstaMealie.Utils.map_get(data, "recipeIngredient") || []) |> Ingredient.from_list(),
       instructions: InstaMealie.Utils.map_get(data, "recipeInstructions") || [],
       tags: InstaMealie.Utils.map_get(data, "tags"),
       categories: InstaMealie.Utils.map_get(data, "categories"),
@@ -74,7 +78,9 @@ defmodule InstaMealie.Recipe do
       total_time: InstaMealie.Utils.map_get(data, "totalTime"),
       prep_time: InstaMealie.Utils.map_get(data, "prepTime"),
       cook_time: InstaMealie.Utils.map_get(data, "cookTime"),
-      perform_time: InstaMealie.Utils.map_get(data, "performTime")
+      perform_time: InstaMealie.Utils.map_get(data, "performTime"),
+      image: InstaMealie.Utils.map_get(data, "image"),
+      source_url: InstaMealie.Utils.map_get(data, "orgURL")
     }
   end
 
@@ -90,14 +96,20 @@ defmodule InstaMealie.Recipe do
     Enum.reduce(@payload_fields, %{}, fn {field, key}, acc ->
       value =
         case {field, Map.get(recipe, field)} do
-          {:ingredients, list} when is_list(list) -> Ingredient.to_payload_list(list)
-          {:tags, list} when is_list(list) -> list
+          {:ingredients, list} when is_list(list) ->
+            Ingredient.to_payload_list(list)
+
+          {:tags, list} when is_list(list) ->
+            list
+
           {:instructions, list} when is_list(list) ->
             Enum.map(list, fn
               inst when is_map(inst) -> Map.put_new(inst, "type", "RecipeInstruction")
               inst -> %{"text" => to_string(inst), "type" => "RecipeInstruction"}
             end)
-          {_, v} -> v
+
+          {_, v} ->
+            v
         end
 
       if is_nil(value) do
@@ -132,7 +144,8 @@ defmodule InstaMealie.Recipe do
          :ok <- validate_string(:cook_time, recipe.cook_time),
          :ok <- validate_string(:perform_time, recipe.perform_time),
          :ok <- validate_list(:tags, recipe.tags),
-         :ok <- validate_list(:categories, recipe.categories) do
+         :ok <- validate_list(:categories, recipe.categories),
+         :ok <- validate_string(:source_url, recipe.source_url) do
       {:ok, recipe}
     end
   end
@@ -169,14 +182,17 @@ defmodule InstaMealie.Recipe do
   defp validate_list(field, _val), do: {:error, field}
 
   defp validate_instructions(nil), do: :ok
+
   defp validate_instructions(list) when is_list(list) do
     Enum.reduce_while(list, :ok, fn
       inst, _acc when is_map(inst) ->
         text = Map.get(inst, "text") || Map.get(inst, :text)
         if is_binary(text), do: {:cont, :ok}, else: {:halt, {:error, :instructions}}
-      _inst, _acc -> {:halt, {:error, :instructions}}
+
+      _inst, _acc ->
+        {:halt, {:error, :instructions}}
     end)
   end
-  defp validate_instructions(_), do: {:error, :instructions}
 
+  defp validate_instructions(_), do: {:error, :instructions}
 end

@@ -6,7 +6,7 @@ defmodule InstaMealieWeb.JobsLive do
   alias InstaMealie.PubSub
 
   @topic "jobs"
-  @stages_order [:fetch, :llm_format, :transcribe, :llm_merge, :mealie_import]
+  @stages_order [:fetch, :llm_format, :scrape_link, :transcribe, :llm_merge, :mealie_import]
 
   @impl true
   def mount(_params, _session, socket) do
@@ -273,7 +273,7 @@ defmodule InstaMealieWeb.JobsLive do
 
         <div class="border-t border-base-300/50 pt-5 sm:pt-6">
           <p class="mb-4 font-mono text-[10px] uppercase tracking-[0.18em] text-base-content/45">
-            The pipeline · 5 stages
+            The pipeline · 6 stages
           </p>
           <.pipeline_strip stages={%{}} ghost={true} show_labels={true} />
         </div>
@@ -349,6 +349,8 @@ defmodule InstaMealieWeb.JobsLive do
                 <.icon name="hero-x-mark" class="size-3.5" />
               <% status == :skipped -> %>
                 <.icon name="hero-minus" class="size-3.5" />
+              <% status == :unresolved -> %>
+                <.icon name="hero-question-mark-circle" class="size-3.5" />
               <% true -> %>
                 <span class="size-2 rounded-full bg-current"></span>
             <% end %>
@@ -656,6 +658,10 @@ defmodule InstaMealieWeb.JobsLive do
     do:
       "flex size-7 shrink-0 items-center justify-center rounded-full border-2 border-dashed border-base-content/30 bg-base-200/70 text-base-content/55"
 
+  defp node_classes(:unresolved),
+    do:
+      "flex size-7 shrink-0 items-center justify-center rounded-full border-2 border-dashed border-warning/50 bg-warning/15 text-warning"
+
   defp node_classes(:ghost),
     do:
       "flex size-7 shrink-0 items-center justify-center rounded-full bg-base-300/70 text-base-content/40"
@@ -666,12 +672,14 @@ defmodule InstaMealieWeb.JobsLive do
 
   defp connector_classes(:done), do: "h-0.5 flex-1 rounded-full bg-primary"
   defp connector_classes(:skipped), do: "h-0.5 flex-1 rounded-full bg-primary"
+  defp connector_classes(:unresolved), do: "h-0.5 flex-1 rounded-full bg-primary"
   defp connector_classes(:ghost), do: "h-0.5 flex-1 rounded-full bg-base-300/70"
   defp connector_classes(_), do: "h-0.5 flex-1 rounded-full bg-base-300"
 
   defp stage_label(:fetch), do: "Fetch"
   defp stage_label(:transcribe), do: "Transcribe"
   defp stage_label(:llm_format), do: "Format"
+  defp stage_label(:scrape_link), do: "Scrape link"
   defp stage_label(:llm_merge), do: "Merge"
   defp stage_label(:mealie_import), do: "Import"
 

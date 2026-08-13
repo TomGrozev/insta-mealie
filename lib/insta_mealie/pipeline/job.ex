@@ -27,9 +27,13 @@ defmodule InstaMealie.Pipeline.Job do
   state map with the shape:
 
       %{
-        job: %Job{},          # the canonical, durable job
-        fetch_data: map|nil,  # stash from :fetch, used by llm_format/transcribe/llm_merge
-        transcript: any|nil,  # stash from :transcribe, used by llm_merge
+        job: %Job{},                # the canonical, durable job
+        fetch_data: map|nil,        # stash from :fetch, used by llm_format/transcribe/llm_merge
+        transcript: any|nil,        # stash from :transcribe, used by llm_merge
+        link_candidates: [String.t()], # link candidates extracted from caption/OP comments
+        consult_link: boolean(),    # router's recommendation to scrape a link (ADR-0006)
+        linked_recipe: %Recipe{} | nil, # recipe scraped from the best candidate URL
+        linked_recipe_url: String.t() | nil, # URL the linked_recipe was scraped from
         stage_task: {%Task{}, atom} | nil  # current async task + the stage it belongs to
       }
 
@@ -78,7 +82,8 @@ defmodule InstaMealie.Pipeline.Job do
     :updated_at
   ]
 
-  @type stage :: :fetch | :llm_format | :transcribe | :llm_merge | :mealie_import
+  @type stage ::
+          :fetch | :llm_format | :scrape_link | :transcribe | :llm_merge | :mealie_import
 
   # ---- GenServer lifecycle ----
 
@@ -107,7 +112,18 @@ defmodule InstaMealie.Pipeline.Job do
   @impl true
   def init({:revive, job}) do
     Registry.register(InstaMealie.Pipeline.Registry, job.id, %{stage: job.state})
-    {:ok, %{job: job, fetch_data: nil, transcript: nil, stage_task: nil}}
+
+    {:ok,
+     %{
+       job: job,
+       fetch_data: nil,
+       transcript: nil,
+       link_candidates: [],
+       consult_link: false,
+       linked_recipe: nil,
+       linked_recipe_url: nil,
+       stage_task: nil
+     }}
   end
 
   @impl true
@@ -116,6 +132,10 @@ defmodule InstaMealie.Pipeline.Job do
       job: job,
       fetch_data: nil,
       transcript: nil,
+      link_candidates: [],
+      consult_link: false,
+      linked_recipe: nil,
+      linked_recipe_url: nil,
       stage_task: nil
     }
 
@@ -142,6 +162,7 @@ defmodule InstaMealie.Pipeline.Job do
             {:stage, :fetch, :skipped},
             {:stage, :transcribe, :skipped},
             {:stage, :llm_format, :done},
+            {:stage, :scrape_link, :skipped},
             {:stage, :llm_merge, :skipped}
           ])
 
@@ -350,13 +371,19 @@ defmodule InstaMealie.Pipeline.Job do
     schedule_stage_timeout(:llm_format)
 
     case llm_format_input(state) do
-      {:ok, input, opts} ->
+      {:ok, caption, comments, links, opts} ->
         task =
           Task.Supervisor.async_nolink(InstaMealie.Pipeline.TaskSupervisor, fn ->
-            InstaMealie.LLM.format(input, opts)
+            InstaMealie.LLM.format({caption, comments, links}, opts)
           end)
 
-        {:noreply, %{state | job: job, stage_task: {task, :llm_format}}}
+        {:noreply,
+         %{
+           state
+           | job: job,
+             stage_task: {task, :llm_format},
+             link_candidates: links
+         }}
 
       {:error, _reason} ->
         {:noreply,
@@ -404,7 +431,7 @@ defmodule InstaMealie.Pipeline.Job do
 
           case Recipe.validate(job.recipe) do
             {:ok, _} ->
-              advance_after_llm_format(%{state | job: job})
+              advance_after_llm_format(%{state | job: job, consult_link: envelope.consult_link})
 
             {:error, field} ->
               {:noreply,
@@ -429,31 +456,48 @@ defmodule InstaMealie.Pipeline.Job do
   end
 
   @impl true
-  def handle_info(:check_caption_completeness, %{job: job} = state) do
-    case job.verdict do
-      :recipe_complete ->
-        job =
-          Pipeline.transition(job, [
-            {:stage, :transcribe, :skipped},
-            {:stage, :llm_merge, :skipped}
-          ])
+  def handle_info(:run_scrape_link, %{job: job} = state) do
+    job = Pipeline.transition(job, [{:stage, :scrape_link, :running}])
+    schedule_stage_timeout(:scrape_link)
 
-        advance(%{state | job: job})
+    candidates = Enum.take(state.link_candidates || [], 3)
 
-      _other ->
-        {:noreply,
-         %{
-           state
-           | job:
-               fail_job(
-                 job,
-                 Error.new(
-                   :incomplete_caption,
-                   "The pasted caption does not contain a complete recipe, and there is no audio to transcribe.",
-                   stage: :llm_format
-                 )
-               )
-         }}
+    task =
+      Task.Supervisor.async_nolink(InstaMealie.Pipeline.TaskSupervisor, fn ->
+        scrape_first_success(candidates)
+      end)
+
+    {:noreply, %{state | job: job, stage_task: {task, :scrape_link}}}
+  end
+
+  def handle_info(
+        {ref, result},
+        %{stage_task: {%Task{ref: ref}, :scrape_link}} = state
+      ) do
+    Process.demonitor(ref, [:flush])
+
+    case result do
+      {:ok, {url, recipe}} ->
+        job = Pipeline.transition(state.job, [{:stage, :scrape_link, :done}])
+
+        decide_after_scrape_link(%{
+          state
+          | job: job,
+            linked_recipe: recipe,
+            linked_recipe_url: url,
+            stage_task: nil
+        })
+
+      {:error, _reason} ->
+        job = Pipeline.transition(state.job, [{:stage, :scrape_link, :unresolved}])
+
+        decide_after_scrape_link(%{
+          state
+          | job: job,
+            linked_recipe: nil,
+            linked_recipe_url: nil,
+            stage_task: nil
+        })
     end
   end
 
@@ -504,11 +548,17 @@ defmodule InstaMealie.Pipeline.Job do
     job = Pipeline.transition(job, [{:stage, :llm_merge, :running}])
     schedule_stage_timeout(:llm_merge)
 
+    # Resolve the caption based on mode — `:caption_only` jobs now reach
+    # llm_merge when the router asks to consult a link (ADR-0006), and those
+    # jobs have no fetch_data. `:url` jobs continue to use fetch.caption.
+    caption = if job.mode == :caption_only, do: job.caption, else: fetch.caption
+
     task =
       Task.Supervisor.async_nolink(InstaMealie.Pipeline.TaskSupervisor, fn ->
-        InstaMealie.LLM.merge(fetch.caption, transcript,
-          output_language: job.output_language,
-          draft: job.recipe
+        InstaMealie.LLM.merge(
+          job.recipe,
+          {caption, transcript, state.linked_recipe},
+          output_language: job.output_language
         )
       end)
 
@@ -572,7 +622,13 @@ defmodule InstaMealie.Pipeline.Job do
 
   @impl true
   def handle_info(:run_import_or_review, %{job: job} = state) do
-    recipe = job.recipe || Recipe.empty()
+    # Stamp provenance BEFORE the ingredient-parse branch so the recipe
+    # PATCHed to Mealie (or held for review) already carries `orgURL` = the
+    # reel URL and a "Recipe link" note when scrape_link resolved a linked
+    # URL (ADR-0006). Once stamped, `job.recipe` is the source of truth and
+    # `recipe` (the local) follows it.
+    recipe = (job.recipe || Recipe.empty()) |> stamp_provenance(job, state)
+    job = Pipeline.transition(job, [{:recipe, recipe}])
 
     if recipe.ingredients == [] do
       # No ingredients to parse — go straight to import.
@@ -652,6 +708,49 @@ defmodule InstaMealie.Pipeline.Job do
         JobAdmission.release(state.job.id)
         {:noreply, %{state | job: JobStore.get(state.job.id) || state.job, stage_task: nil}}
     end
+  end
+
+  # scrape_link failure of any kind (timeout, crash, or scrape failure) is
+  # SURVIVABLE — it does NOT fail the job. This specific clause must precede
+  # the generic {:stage_timeout, stage} clause below, otherwise Elixir's
+  # top-to-bottom matching would route scrape_link timeouts through the
+  # generic fail-and-stop path.
+  def handle_info({:stage_timeout, :scrape_link}, %{job: job} = state) do
+    if Map.get(job.stages, :scrape_link) == :running do
+      Logger.warning("[pipeline] job #{job.id} scrape_link timed out — marking unresolved")
+      state = kill_stage_task(state)
+      job = Pipeline.transition(job, [{:stage, :scrape_link, :unresolved}])
+
+      decide_after_scrape_link(%{
+        state
+        | job: job,
+          linked_recipe: nil,
+          linked_recipe_url: nil
+      })
+    else
+      {:noreply, state}
+    end
+  end
+
+  # scrape_link task crash is SURVIVABLE — same reasoning as the timeout
+  # clause above. Must precede the generic {:DOWN, ...} clause below.
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{stage_task: {%Task{ref: ref}, :scrape_link}} = state
+      ) do
+    Logger.warning(
+      "[pipeline] job #{state.job.id} scrape_link task crashed: #{inspect(reason)} — marking unresolved"
+    )
+
+    job = Pipeline.transition(state.job, [{:stage, :scrape_link, :unresolved}])
+
+    decide_after_scrape_link(%{
+      state
+      | job: job,
+        linked_recipe: nil,
+        linked_recipe_url: nil,
+        stage_task: nil
+    })
   end
 
   @impl true
@@ -743,14 +842,15 @@ defmodule InstaMealie.Pipeline.Job do
       Map.get(job.stages, :llm_format) not in [:done, :skipped, :failed] ->
         :idle
 
-      # Caption-only mode: after llm_format :done and BEFORE transcribe has
-      # been routed (transcribe still nil), check the verdict. The
-      # `transcribe not in [:done, :skipped, :failed]` guard prevents a
-      # re-entry loop once :check_caption_completeness has set transcribe
-      # to :skipped.
-      job.mode == :caption_only and
-          Map.get(job.stages, :transcribe) not in [:done, :skipped, :failed] ->
-        :check_caption_completeness
+      # scrape_link is running → run it.
+      Map.get(job.stages, :scrape_link) == :running ->
+        :run_scrape_link
+
+      # scrape_link is in a non-final state (`:unresolved` is terminal for
+      # this stage and lets the FSM advance, so it's excluded from this
+      # "non-final" guard).
+      Map.get(job.stages, :scrape_link) not in [:done, :skipped, :failed, :unresolved] ->
+        :idle
 
       # Transcribe is running → run it.
       Map.get(job.stages, :transcribe) == :running ->
@@ -784,38 +884,143 @@ defmodule InstaMealie.Pipeline.Job do
     end
   end
 
-  # After llm_format succeeds, branch on (mode, verdict) to set up the next
-  # stage transitions before calling advance.
+  # After llm_format succeeds, decide the `scrape_link` stage and dispatch it
+  # when the router asked for one (ADR-0006). When scrape_link is skipped,
+  # there is no async task to wait for — `decide_after_scrape_link/1` is the
+  # single place that decides what runs next (transcribe / llm_merge / fail),
+  # for both modes.
   defp advance_after_llm_format(%{job: job} = state) do
+    candidates = Enum.take(state.link_candidates || [], 3)
+
+    job =
+      if state.consult_link && candidates != [] do
+        Pipeline.transition(job, [{:stage, :scrape_link, :running}])
+      else
+        Pipeline.transition(job, [{:stage, :scrape_link, :skipped}])
+      end
+
+    state = %{state | job: job}
+
+    if Map.get(job.stages, :scrape_link) == :running do
+      advance(state)
+    else
+      decide_after_scrape_link(%{state | linked_recipe: nil, linked_recipe_url: nil})
+    end
+  end
+
+  # Single decision point after scrape_link has resolved (or been skipped).
+  # Both `:caption_only` and `:url` modes route through here:
+  #
+  # * `:recipe_complete` verdict skips both transcribe and llm_merge EXCEPT
+  #   when scrape_link actually executed (i.e. `job.stages[:scrape_link]` is
+  #   not `:skipped`); then llm_merge runs so the linked recipe can fill in
+  #   anything the caption missed (ADR-0006 — completeness and
+  #   link-consultation are independent axes; recipe_complete no longer
+  #   implies skip-merge). We key the llm_merge decision off scrape_link
+  #   execution rather than the raw `state.consult_link` flag, so a router
+  #   that asked to consult a link but found zero candidates (correctly
+  #   marking scrape_link `:skipped`) falls back to pre-#50 behaviour
+  #   exactly.
+  # * Linked recipe covers all missing_fields → skip transcribe, run llm_merge
+  #   (a structural check, no extra LLM call).
+  # * `:caption_only` mode with no covered fallback → `:incomplete_caption`
+  #   failure (no audio path is available to recover).
+  # * `:url` mode with no covered fallback → proceed to transcription.
+  defp decide_after_scrape_link(%{job: job} = state) do
+    covered = linked_recipe_covers_missing_fields?(state.linked_recipe, job.missing_fields)
+
     case job.mode do
       :caption_only ->
-        # Always defer to :check_caption_completeness regardless of verdict.
-        advance(state)
-
-      :url ->
-        case job.verdict do
-          :recipe_complete ->
+        cond do
+          job.verdict == :recipe_complete ->
             job =
               Pipeline.transition(job, [
                 {:stage, :transcribe, :skipped},
-                {:stage, :llm_merge, :skipped}
+                {:stage, :llm_merge,
+                 if(Map.get(job.stages, :scrape_link) != :skipped, do: :running, else: :skipped)}
               ])
 
             advance(%{state | job: job})
 
-          _other ->
-            # :recipe_partial or :no_recipe — proceed to transcription.
+          covered ->
+            job =
+              Pipeline.transition(job, [
+                {:stage, :transcribe, :skipped},
+                {:stage, :llm_merge, :running}
+              ])
+
+            advance(%{state | job: job})
+
+          true ->
+            {:noreply,
+             %{
+               state
+               | job:
+                   fail_job(
+                     job,
+                     Error.new(
+                       :incomplete_caption,
+                       "The pasted caption does not contain a complete recipe, and there is no audio to transcribe.",
+                       stage: :llm_format
+                     )
+                   )
+             }}
+        end
+
+      :url ->
+        cond do
+          job.verdict == :recipe_complete ->
+            job =
+              Pipeline.transition(job, [
+                {:stage, :transcribe, :skipped},
+                {:stage, :llm_merge,
+                 if(Map.get(job.stages, :scrape_link) != :skipped, do: :running, else: :skipped)}
+              ])
+
+            advance(%{state | job: job})
+
+          covered ->
+            job =
+              Pipeline.transition(job, [
+                {:stage, :transcribe, :skipped},
+                {:stage, :llm_merge, :running}
+              ])
+
+            advance(%{state | job: job})
+
+          true ->
             job = Pipeline.transition(job, [{:stage, :transcribe, :running}])
             advance(%{state | job: job})
         end
     end
   end
 
+  # Structural check (issue #50, item 4) — no LLM call. A linked recipe
+  # "covers" missing_fields only when it actually supplies non-empty content
+  # for every entry; an empty missing_fields list or a nil linked recipe
+  # never counts as covered (recipe_complete/no_recipe are handled by the
+  # branches above it).
+  defp linked_recipe_covers_missing_fields?(nil, _missing_fields), do: false
+  defp linked_recipe_covers_missing_fields?(_recipe, nil), do: false
+  defp linked_recipe_covers_missing_fields?(_recipe, []), do: false
+
+  defp linked_recipe_covers_missing_fields?(%Recipe{} = recipe, missing_fields)
+       when is_list(missing_fields) do
+    Enum.all?(missing_fields, fn
+      :recipeIngredient -> recipe.ingredients not in [nil, []]
+      :recipeInstructions -> recipe.instructions not in [nil, []]
+      _ -> false
+    end)
+  end
+
   # Pick the LLM.format input + opts based on the job's mode. Caption-only
   # uses the pasted caption; URL mode uses the fetch result stashed in the
-  # GenServer state by :run_fetch.
+  # GenServer state by :run_fetch. Both modes compute candidate link URLs
+  # via `InstaMealie.LinkExtractor.extract/2` so the router can decide
+  # whether `scrape_link` should run (ADR-0006).
   defp llm_format_input(%{job: %{mode: :caption_only} = job}) do
-    {:ok, job.caption, [comments: [], output_language: job.output_language]}
+    links = InstaMealie.LinkExtractor.extract(job.caption || "", [])
+    {:ok, job.caption, [], links, [output_language: job.output_language]}
   end
 
   defp llm_format_input(%{job: %{mode: :url} = job, fetch_data: fetch}) do
@@ -825,7 +1030,9 @@ defmodule InstaMealie.Pipeline.Job do
 
       fetch ->
         op_comments = filter_op_comments(Map.get(fetch, :author), Map.get(fetch, :comments))
-        {:ok, fetch.caption, [comments: op_comments, output_language: job.output_language]}
+        links = InstaMealie.LinkExtractor.extract(fetch.caption, op_comments)
+
+        {:ok, fetch.caption, op_comments, links, [output_language: job.output_language]}
     end
   end
 
@@ -872,6 +1079,63 @@ defmodule InstaMealie.Pipeline.Job do
 
     if timeout && timeout > 0 do
       Process.send_after(self(), {:stage_timeout, stage}, timeout)
+    end
+  end
+
+  # ---- provenance stamping (ADR-0006) ----
+  # Applied once in `:run_import_or_review`, immediately before the
+  # ingredient-parse branch. Always runs — even when scrape_link never ran or
+  # never resolved — so `orgURL` is the reel URL on every imported recipe.
+
+  # `:url` mode: stamp `orgURL` to the reel URL (when the recipe hasn't
+  # already set one), append a "Recipe link" note for the linked page, and
+  # fall back to the linked recipe's image when the reel one is missing.
+  defp stamp_provenance(recipe, %{mode: :url, url: url}, state) when is_binary(url) do
+    recipe
+    |> maybe_set_source_url(url)
+    |> maybe_append_linked_note(state.linked_recipe_url)
+    |> maybe_fallback_image(state.linked_recipe)
+  end
+
+  # `:caption_only` and other modes: no reel URL to stamp, but the linked
+  # note and image fallback still apply when scrape_link resolved.
+  defp stamp_provenance(recipe, _job, state) do
+    recipe
+    |> maybe_append_linked_note(state.linked_recipe_url)
+    |> maybe_fallback_image(state.linked_recipe)
+  end
+
+  defp maybe_set_source_url(%Recipe{source_url: nil} = recipe, url),
+    do: %{recipe | source_url: url}
+
+  defp maybe_set_source_url(recipe, _url), do: recipe
+
+  defp maybe_append_linked_note(recipe, nil), do: recipe
+
+  defp maybe_append_linked_note(recipe, url) when is_binary(url) do
+    existing = recipe.notes || []
+    %{recipe | notes: existing ++ [%{"title" => "Recipe link", "text" => url}]}
+  end
+
+  defp maybe_fallback_image(
+         %Recipe{image: nil} = recipe,
+         %Recipe{image: linked_image}
+       )
+       when is_binary(linked_image) and linked_image != "" do
+    %{recipe | image: linked_image}
+  end
+
+  defp maybe_fallback_image(recipe, _linked), do: recipe
+
+  # Runs inside the scrape_link Task: try candidates in order, first success wins.
+  # Returns `{:ok, {url, recipe}}` for the first candidate that scrapes, or
+  # `{:error, :no_candidates}` when the list is empty / all candidates fail.
+  defp scrape_first_success([]), do: {:error, :no_candidates}
+
+  defp scrape_first_success([url | rest]) do
+    case InstaMealie.Mealie.scrape_url(url) do
+      {:ok, recipe} -> {:ok, {url, recipe}}
+      {:error, _} -> scrape_first_success(rest)
     end
   end
 

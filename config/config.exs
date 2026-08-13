@@ -73,6 +73,7 @@ config :insta_mealie, :insta_mealie,
   stage_timeouts: %{
     fetch: 120_000,
     llm_format: 180_000,
+    scrape_link: 60_000,
     transcribe: 300_000,
     llm_merge: 180_000,
     mealie_import: 60_000

@@ -8,5 +8,6 @@ defmodule InstaMealie.Whisper.Adapter do
   alias InstaMealie.Error
 
   @doc "Transcribe an audio file and return the text."
-  @callback transcribe(String.t(), String.t(), String.t(), String.t()) :: {:ok, String.t()} | {:error, Error.t()}
+  @callback transcribe(String.t(), String.t(), String.t(), String.t()) ::
+              {:ok, String.t()} | {:error, Error.t()}
 end

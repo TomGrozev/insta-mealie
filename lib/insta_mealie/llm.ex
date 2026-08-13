@@ -4,7 +4,7 @@ defmodule InstaMealie.LLM.Envelope do
 
   Carried through the pipeline as the output of `LLM.format/2` and `LLM.merge/3`.
   """
-  defstruct [:recipe, :completeness, :missing_fields]
+  defstruct [:recipe, :completeness, :missing_fields, :consult_link]
 end
 
 defmodule InstaMealie.LLM do
@@ -13,7 +13,8 @@ defmodule InstaMealie.LLM do
 
   Both calls return `{:ok, %InstaMealie.LLM.Envelope{}}` with fields:
   `completeness` (`:recipe_complete` | `:recipe_partial` | `:no_recipe`),
-  `missing_fields` (list of atoms), and `recipe` (a `%Recipe{}` struct or empty map).
+  `missing_fields` (list of atoms), `consult_link` (boolean — see ADR-0006),
+  and `recipe` (a `%Recipe{}` struct or empty map).
 
   ## Routing verdict contract
 
@@ -29,10 +30,21 @@ defmodule InstaMealie.LLM do
   `no_recipe` must never cause a fabricated recipe name — that
   invariant is the prompt's responsibility; the interpreter only
   forwards what it is given.
+
+  ## consult_link contract (ADR-0006)
+
+  `consult_link` is the LLM's recommendation to the pipeline that it should
+  scrape one of the candidate URLs from the caption/comments. It is an
+  independent axis from `completeness`: a complete caption with an
+  authoritative-looking link still asks to consult it, while a no-recipe
+  caption with no link does not. Strict-whitelist parsed by
+  `envelope_from_json/1` — only the literal JSON `true` maps to `true`,
+  everything else (including the string `"true"`) maps to `false`.
   """
   require Logger
 
   alias InstaMealie.Error
+  alias InstaMealie.Ingredient
   alias InstaMealie.LLM.Envelope
   alias InstaMealie.Recipe
 
@@ -40,6 +52,7 @@ defmodule InstaMealie.LLM do
   @type envelope :: %Envelope{
           completeness: completeness(),
           missing_fields: list(),
+          consult_link: boolean(),
           recipe: Recipe.t()
         }
 
@@ -73,30 +86,36 @@ defmodule InstaMealie.LLM do
 
   # ── Public API ─────────────────────────────────────────────────────
 
-  @spec format(String.t(), keyword()) :: {:ok, envelope} | {:error, Error.t()}
-  def format(caption, opts \\ []) do
+  @spec format(sources :: {String.t(), list(), [String.t()]}, keyword()) ::
+          {:ok, envelope} | {:error, Error.t()}
+  def format(sources, opts \\ []) when is_tuple(sources) do
+    {caption, comments, links} = sources
     output_language = Keyword.get(opts, :output_language, "en")
-    comments = Keyword.get(opts, :comments, [])
 
     cfg = config()
     model = cfg[:model]
 
     messages =
-      build_format_messages(caption, output_language, comments)
+      build_format_messages(caption, output_language, comments, links)
 
     request_llm(:format, model, messages)
   end
 
-  @spec merge(String.t(), String.t(), keyword()) :: {:ok, envelope} | {:error, Error.t()}
-  def merge(caption, transcript, opts \\ []) do
+  @spec merge(
+          Recipe.t() | nil,
+          sources :: {String.t(), String.t() | nil, Recipe.t() | nil},
+          keyword()
+        ) ::
+          {:ok, envelope} | {:error, Error.t()}
+  def merge(draft, sources, opts \\ []) when is_tuple(sources) do
+    {caption, transcript, linked_recipe} = sources
     output_language = Keyword.get(opts, :output_language, "en")
-    draft = Keyword.get(opts, :draft)
 
     cfg = config()
     model = cfg[:merge_model] || cfg[:model]
 
     messages =
-      build_merge_messages(caption, transcript, output_language, draft)
+      build_merge_messages(caption, transcript, output_language, draft, linked_recipe)
 
     request_llm(:merge, model, messages)
   end
@@ -163,13 +182,19 @@ defmodule InstaMealie.LLM do
   def envelope_from_json(json) when is_map(json) do
     completeness = parse_completeness(json["completeness"])
     missing_fields = parse_missing_fields(json["missing_fields"])
+    consult_link = parse_consult_link(json["consult_link"])
 
     recipe =
       (json["recipe"] || %{})
       |> normalize_durations()
       |> Recipe.from_map()
 
-    %Envelope{completeness: completeness, missing_fields: missing_fields, recipe: recipe}
+    %Envelope{
+      completeness: completeness,
+      missing_fields: missing_fields,
+      consult_link: consult_link,
+      recipe: recipe
+    }
   end
 
   # ── Completeness whitelist ─────────────────────────────────────────
@@ -180,6 +205,15 @@ defmodule InstaMealie.LLM do
   defp parse_completeness(_), do: :unknown
 
   defp valid_completeness?(c), do: c in [:recipe_complete, :recipe_partial, :no_recipe]
+
+  # ── consult_link whitelist (ADR-0006) ──────────────────────────────
+
+  # Strict whitelist matching `parse_completeness/1`'s style: only the
+  # literal JSON `true` maps to `true`. Anything else — missing,
+  # `false`, the string "true", integers, lists, nil — maps to `false`.
+  # Missing keys from the old few-shot examples stay compatible.
+  defp parse_consult_link(true), do: true
+  defp parse_consult_link(_), do: false
 
   # ── Missing fields whitelist ───────────────────────────────────────
 
@@ -331,7 +365,7 @@ defmodule InstaMealie.LLM do
 
   # ── Message builders ───────────────────────────────────────────────
 
-  defp build_format_messages(caption, output_language, comments) do
+  defp build_format_messages(caption, output_language, comments, links) do
     comments_text =
       case comments do
         [] ->
@@ -345,19 +379,33 @@ defmodule InstaMealie.LLM do
             end)
       end
 
+    links_text =
+      case links do
+        [] ->
+          ""
+
+        _ ->
+          "\n\nCandidate recipe links:\n" <>
+            Enum.map_join(links, "\n", fn url -> "  - #{url}" end)
+      end
+
     system = """
     You are a recipe extractor for Instagram food reels. Given an Instagram caption (and optionally the reel owner's comments), determine whether it contains a recipe.
+
+    You may also see a list of "candidate recipe links" — URLs that were found in the caption or OP comments (after dropping link-aggregators, linktree-style pages, and Instagram wrappers). These are candidates the pipeline *might* follow to a third-party recipe page. Do not browse them; just use their presence to decide whether the caption is pointing off-platform for its full recipe.
 
     Return ONLY a JSON object with this exact shape:
     {
       "completeness": "recipe_complete" | "recipe_partial" | "no_recipe",
       "missing_fields": [],
+      "consult_link": false,
       "recipe": { ...Mealie recipe fields... }
     }
 
     Rules:
     - `completeness` must be exactly one of: "recipe_complete", "recipe_partial", "no_recipe".
     - `missing_fields` may ONLY contain "recipeIngredient" or "recipeInstructions". Leave it empty [] when completeness is "recipe_complete" or "no_recipe".
+    - `consult_link` must be a JSON boolean. Set it to `true` when the caption is missing a section (e.g. no instructions, "full recipe on my blog") OR clearly points to an off-platform recipe (e.g. "recipe on my website", a candidate link whose anchor text says "full recipe"). Set it to `false` otherwise — including when there are no candidate links.
     - On "no_recipe", the "recipe" MUST be an empty object {}. Do NOT invent a recipe name.
     - On "recipe_complete", include ALL fields: name, description, recipeYield, recipeIngredient (list of strings), recipeInstructions (list of objects with "text" key), tags (list of strings), and optionally totalTime, prepTime, cookTime, performTime as ISO-8601 durations.
     - Each `recipeIngredient` entry must be exactly ONE ingredient. Never combine multiple ingredients into a single entry using "+", "and", or a comma — split them into separate list entries instead (e.g. "Melted dark chocolate + 1 tsp coconut oil" becomes "Melted dark chocolate" and "1 tsp coconut oil").
@@ -369,7 +417,7 @@ defmodule InstaMealie.LLM do
     Output language: #{output_language}
     """
 
-    user_content = caption <> comments_text
+    user_content = caption <> comments_text <> links_text
 
     ([
        %{role: "system", content: system}
@@ -384,7 +432,7 @@ defmodule InstaMealie.LLM do
     |> List.flatten()
   end
 
-  defp build_merge_messages(caption, transcript, output_language, draft) do
+  defp build_merge_messages(caption, transcript, output_language, draft, linked_recipe) do
     draft_text =
       case draft do
         nil ->
@@ -409,16 +457,53 @@ defmodule InstaMealie.LLM do
           ""
       end
 
+    linked_text =
+      case linked_recipe do
+        nil ->
+          ""
+
+        %Recipe{} = lr ->
+          payload = linked_recipe_projection(lr)
+
+          if map_size(payload) == 0 do
+            ""
+          else
+            "\n\nLinked recipe (may be a base/related recipe the creator adapted from — not authoritative):\n" <>
+              Jason.encode!(payload)
+          end
+
+        _ ->
+          ""
+      end
+
+    # Transcript rendering distinguishes "no audio was transcribed" (nil —
+    # omit the section entirely) from "audio was transcribed but produced
+    # no text" ("" — keep the section, label as empty). Conflating them
+    # makes the model guess whether to trust the absence.
+    transcript_line =
+      case transcript do
+        nil ->
+          ""
+
+        "" ->
+          "\n\nTranscript: (empty)"
+
+        text ->
+          "\n\nTranscript: #{text}"
+      end
+
     system = """
     You are a recipe merge assistant for Instagram food reels. You receive:
     1. The original Instagram caption
-    2. A voiceover transcript from the reel
+    2. A voiceover transcript from the reel (may be absent — see the user message)
     3. Optionally, a partial recipe draft extracted from the caption
+    4. Optionally, a linked recipe scraped from a URL found in the caption or comments — this may be a related or base recipe the creator adapted from, not necessarily this exact dish
 
     Merge ALL available information into a FINAL complete Mealie recipe. Return ONLY a JSON object with this exact shape:
     {
       "completeness": "recipe_complete" | "recipe_partial" | "no_recipe",
       "missing_fields": [],
+      "consult_link": false,
       "recipe": { ...Mealie recipe fields... }
     }
 
@@ -433,11 +518,15 @@ defmodule InstaMealie.LLM do
     - Use string keys for all recipe fields.
     - tags should capture relevant recipe categories inferred from the content.
     - Include totalTime, prepTime, cookTime, performTime as ISO-8601 durations when mentioned.
+    - **Linked recipe is a SUSPECT source (ADR-0006).** Use it ONLY to fill gaps — missing ingredients, missing instructions, missing yield or times. The linked recipe may NEVER overwrite what the caption states explicitly, may NEVER rename the recipe, and may NEVER drop an ingredient the caption lists. If the caption and the linked recipe disagree, the caption wins.
+    - When the transcript is absent from the user message (transcription was skipped), rely on the caption and the linked recipe only.
 
     Output language: #{output_language}
     """
 
-    user_content = "Caption: #{caption}\n\nTranscript: #{transcript}#{draft_text}"
+    user_content =
+      "Caption: #{caption}" <>
+        transcript_line <> draft_text <> linked_text
 
     ([
        %{role: "system", content: system}
@@ -451,6 +540,29 @@ defmodule InstaMealie.LLM do
        [%{role: "user", content: user_content}])
     |> List.flatten()
   end
+
+  # Restricted projection of a `%Recipe{}` for the *linked* source only.
+  # ADR-0006: only `recipeIngredient`, `recipeInstructions`, `recipeYield`,
+  # and the four time fields are taken from the linked recipe. Name,
+  # description, tags, categories, and notes are deliberately omitted —
+  # the merge prompt instructs the model that the linked recipe is a
+  # suspect supplementary source that may NEVER rename the dish (ADR-0006),
+  # so we must not hand the model the very renaming bait that rule exists
+  # to prevent.
+  defp linked_recipe_projection(%Recipe{} = recipe) do
+    %{}
+    |> maybe_put("recipeIngredient", Ingredient.to_prompt_string_list(recipe.ingredients))
+    |> maybe_put("recipeInstructions", recipe.instructions)
+    |> maybe_put("recipeYield", recipe.recipe_yield)
+    |> maybe_put("totalTime", recipe.total_time)
+    |> maybe_put("prepTime", recipe.prep_time)
+    |> maybe_put("cookTime", recipe.cook_time)
+    |> maybe_put("performTime", recipe.perform_time)
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, []), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   # ── Config ────────────────────────────────────────────────────────
 

@@ -487,7 +487,8 @@ defmodule InstaMealie.Pipeline do
     %{job | stage: stage, stages: Map.put(job.stages, stage, :failed)}
   end
 
-  defp apply_change(job, {:stage, stage, status}) when status in [:done, :skipped, :pending] do
+  defp apply_change(job, {:stage, stage, status})
+       when status in [:done, :skipped, :pending, :unresolved] do
     old = Map.get(job.stages, stage)
 
     if old != status do

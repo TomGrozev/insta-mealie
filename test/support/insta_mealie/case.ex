@@ -154,6 +154,9 @@ defmodule InstaMealie.TestCase do
 
           {:ok, %{"id" => slug, "name" => name, "slug" => slug}}
 
+        m == :post and p == "/api/recipes/test-scrape-url" ->
+          {:error, InstaMealie.Error.new(:validation, "not scrapeable (default test stub)")}
+
         m == :post and p == "/api/parser/ingredients" ->
           ingredients = body["ingredients"] || []
 

@@ -18,6 +18,10 @@ _Avoid_: description, post text
 The recovery path where the user pastes the caption text directly after a reel fetch fails; it reuses the same job rather than starting a new one.
 _Avoid_: manual input, paste mode
 
+**Recipe link**
+A URL found in a reel's caption or OP comments that points to a recipe page, and is a candidate for scraping.
+_Avoid_: source link, external link, blog link
+
 ### Pipeline & Jobs
 
 **Job**
@@ -28,7 +32,7 @@ _Avoid_: run, task, request
 The set of operations the pipeline offers on a job: `:retry`, `:paste_caption`, `:transcribe_anyway`, or `:cancel`. Decided by `Pipeline.available_actions/1` and rendered by the UI.
 
 **Stage**
-A discrete step in a job's pipeline. The canonical stages are `fetch`, `transcribe`, `llm_format`, `llm_merge`, and `mealie_import`. `llm_merge` refines the local recipe draft with transcription — it is not a Mealie-side merge.
+A discrete step in a job's pipeline. The canonical stages, in order, are `fetch`, `llm_format`, `scrape_link`, `transcribe`, `llm_merge`, and `mealie_import`. `llm_merge` refines the local recipe draft with transcription and the linked recipe — it is not a Mealie-side merge.
 _Avoid_: step, phase
 
 **Terminal state**
@@ -46,7 +50,7 @@ Convert a reel's audio to text, via Whisper.
 _Avoid_: speech-to-text, STT
 
 **Recipe verdict**
-The LLM's classification of how complete the extracted recipe is: `recipe_complete`, `recipe_partial`, or `no_recipe`. It is carried in the response envelope's `completeness` field alongside the list of `missing_fields`.
+The LLM's classification of how complete the extracted recipe is: `recipe_complete`, `recipe_partial`, or `no_recipe`. It is carried in the response envelope's `completeness` field alongside the list of `missing_fields`. It decides whether a job transcribes, but not whether it reads a recipe link — that is a separate axis carried in the envelope's `consult_link` field, so a complete caption can still consult a link without transcribing.
 _Avoid_: completeness flag, verdict
 
 **Transcribe-anyway override**
@@ -58,6 +62,10 @@ _Avoid_: force-transcribe, override
 **Recipe draft**
 The local, in-progress recipe a job builds and refines (through `llm_format` → `llm_merge` → ingredient review) before it is posted to Mealie. It holds the name, description, yield, times, tags, raw ingredient strings, and instruction steps.
 _Avoid_: recipe object, recipe struct
+
+**Linked recipe**
+The structured recipe scraped from a recipe link. It is a supplementary source during `llm_merge`, trusted to fill gaps in the recipe draft but never to overwrite what the caption states explicitly.
+_Avoid_: external recipe, scraped recipe, source recipe
 
 **Mealie recipe**
 The recipe entity persisted in Mealie, identified by a slug.
@@ -104,7 +112,7 @@ _Avoid_: selector, candidate list
 ### Errors & Retries
 
 **Error stage**
-The pipeline stage where a failure occurred: `fetch`, `transcribe`, `llm_format`, `llm_merge`, or `mealie_import`.
+The pipeline stage where a failure occurred: `fetch`, `transcribe`, `llm_format`, `llm_merge`, or `mealie_import`. `scrape_link` is deliberately absent — its failure is survivable and marks that stage `:unresolved` rather than failing the job.
 _Avoid_: failed step
 
 **Error class**
