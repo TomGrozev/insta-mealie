@@ -32,8 +32,84 @@ defmodule InstaMealie.Mealie do
   @spec search_foods(String.t()) :: {:ok, list()} | {:error, Error.t()}
   def search_foods(term) when is_binary(term), do: search_collection("foods", term)
 
+  @doc """
+  Resolve a food name to an existing Mealie food or create it, and return
+  the food's id.
+
+  Searches `/api/foods` first and reuses any result whose `name` field
+  matches the input exactly (the existing client semantics — no
+  case-insensitive or slug-equivalence fallback). When no exact match
+  exists, POSTs `/api/foods` with a name-only payload to create it.
+
+  Search and create errors are propagated verbatim — failures are never
+  treated as "food not found", which would silently mask the real cause
+  and risk creating a duplicate record.
+  """
+  @spec get_or_create_food(String.t()) :: {:ok, String.t()} | {:error, Error.t()}
+  def get_or_create_food(name) when is_binary(name) do
+    case search_foods(name) do
+      {:ok, results} ->
+        case find_exact_food_id(results, name) do
+          {:ok, food_id} ->
+            Logger.info(
+              "[mealie] get_or_create_food reused existing food #{food_id} for #{inspect(name)}"
+            )
+
+            {:ok, food_id}
+
+          :none ->
+            create_food(name)
+        end
+
+      {:error, %Error{} = error} ->
+        Logger.error(
+          "[mealie] get_or_create_food search failed (#{error.class}: #{error.summary})"
+        )
+
+        {:error, error}
+    end
+  end
+
   @spec search_units(String.t()) :: {:ok, list()} | {:error, Error.t()}
   def search_units(term) when is_binary(term), do: search_collection("units", term)
+
+  @doc """
+  Resolve a unit name to an existing Mealie unit or create it, and return
+  the unit's id.
+
+  Searches `/api/units` first and reuses any result whose `name` field
+  matches the input exactly (the existing client semantics — no
+  case-insensitive or slug-equivalence fallback). When no exact match
+  exists, POSTs `/api/units` with a name-only payload to create it.
+
+  Search and create errors are propagated verbatim — failures are never
+  treated as "unit not found", which would silently mask the real cause
+  and risk creating a duplicate record.
+  """
+  @spec get_or_create_unit(String.t()) :: {:ok, String.t()} | {:error, Error.t()}
+  def get_or_create_unit(name) when is_binary(name) do
+    case search_units(name) do
+      {:ok, results} ->
+        case find_exact_unit_id(results, name) do
+          {:ok, unit_id} ->
+            Logger.info(
+              "[mealie] get_or_create_unit reused existing unit #{unit_id} for #{inspect(name)}"
+            )
+
+            {:ok, unit_id}
+
+          :none ->
+            create_unit(name)
+        end
+
+      {:error, %Error{} = error} ->
+        Logger.error(
+          "[mealie] get_or_create_unit search failed (#{error.class}: #{error.summary})"
+        )
+
+        {:error, error}
+    end
+  end
 
   @spec parse_ingredients(list(String.t())) :: {:ok, list(map())} | {:error, Error.t()}
   def parse_ingredients(list) when is_list(list) do
@@ -281,6 +357,66 @@ defmodule InstaMealie.Mealie do
   defp extract_results(%{"items" => items}) when is_list(items), do: items
   defp extract_results(%{"data" => data}) when is_list(data), do: data
   defp extract_results(_), do: []
+
+  # ── Food helpers ───────────────────────────────────────────────────
+
+  defp find_exact_food_id(results, name) when is_list(results) and is_binary(name) do
+    case Enum.find(results, fn result -> Map.get(result, "name") == name end) do
+      %{"id" => id} when is_binary(id) -> {:ok, id}
+      _ -> :none
+    end
+  end
+
+  defp create_food(name) when is_binary(name) do
+    case request(:post, "/api/foods", %{"name" => name}) do
+      {:ok, body} when is_map(body) ->
+        case body["id"] do
+          id when is_binary(id) ->
+            Logger.info("[mealie] get_or_create_food created food #{id} for #{inspect(name)}")
+            {:ok, id}
+
+          _ ->
+            {:error, Error.new(:api_error, "food create response missing id")}
+        end
+
+      {:error, %Error{} = error} ->
+        Logger.error(
+          "[mealie] get_or_create_food create failed (#{error.class}: #{error.summary})"
+        )
+
+        {:error, error}
+    end
+  end
+
+  # ── Unit helpers ───────────────────────────────────────────────────
+
+  defp find_exact_unit_id(results, name) when is_list(results) and is_binary(name) do
+    case Enum.find(results, fn result -> Map.get(result, "name") == name end) do
+      %{"id" => id} when is_binary(id) -> {:ok, id}
+      _ -> :none
+    end
+  end
+
+  defp create_unit(name) when is_binary(name) do
+    case request(:post, "/api/units", %{"name" => name}) do
+      {:ok, body} when is_map(body) ->
+        case body["id"] do
+          id when is_binary(id) ->
+            Logger.info("[mealie] get_or_create_unit created unit #{id} for #{inspect(name)}")
+            {:ok, id}
+
+          _ ->
+            {:error, Error.new(:api_error, "unit create response missing id")}
+        end
+
+      {:error, %Error{} = error} ->
+        Logger.error(
+          "[mealie] get_or_create_unit create failed (#{error.class}: #{error.summary})"
+        )
+
+        {:error, error}
+    end
+  end
 
   # ── Image upload ───────────────────────────────────────────────────
 

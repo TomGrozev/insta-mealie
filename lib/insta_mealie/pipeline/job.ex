@@ -54,6 +54,7 @@ defmodule InstaMealie.Pipeline.Job do
 
   alias InstaMealie.Pipeline
   alias InstaMealie.Error
+  alias InstaMealie.Mealie
   alias InstaMealie.Recipe
   alias InstaMealie.Ingredient
   alias InstaMealie.Pipeline.{JobAdmission, JobStore}
@@ -274,10 +275,24 @@ defmodule InstaMealie.Pipeline.Job do
 
   @impl true
   def handle_call({:resolve_ingredients, resolutions}, _from, %{job: job} = state) do
-    ingredients = Ingredient.apply_resolutions(job.recipe.ingredients, resolutions)
-    updated_recipe = %{job.recipe | ingredients: ingredients}
+    case resolve_resolution_ids(resolutions) do
+      {:ok, enriched} ->
+        ingredients = Ingredient.apply_resolutions(job.recipe.ingredients, enriched)
+        updated_recipe = %{job.recipe | ingredients: ingredients}
 
-    reimport(state, [{:recipe, updated_recipe}, {:stage, :mealie_import, :running}])
+        reimport(state, [{:recipe, updated_recipe}, {:stage, :mealie_import, :running}])
+
+      {:error, %Error{} = error} ->
+        # The resolution step is part of the mealie_import path: the user
+        # resolved ingredients and the next step is the Mealie PATCH. Attribute
+        # any lookup failure to that stage and let the existing `fail_job/2`
+        # convention carry the job to its failure terminal state.
+        error = %Error{error | stage: :mealie_import}
+        failed = fail_job(job, error)
+        JobAdmission.release(failed.id)
+        re_read = JobStore.get(failed.id) || failed
+        {:reply, {:error, error}, %{state | job: re_read}}
+    end
   end
 
   @impl true
@@ -313,6 +328,74 @@ defmodule InstaMealie.Pipeline.Job do
     re_read = JobStore.get(job.id) || updated
     {:reply, result, %{state | job: re_read}}
   end
+
+  # Walk the resolutions map and merge Mealie ids into each entry that has a
+  # nonblank food/unit name without an explicit id. The merge is what makes
+  # `Ingredient.apply_resolutions/2` emit a `%Ref{name: name, id: id}`, which
+  # `Ingredient.to_payload/1` then renders as the nested `{id, name}` object
+  # Mealie's PATCH expects.
+  #
+  # Resolution rules:
+  #   * Explicit `food_id` / `unit_id` in the entry → leave alone, no API call.
+  #   * Blank / nil food or unit → leave alone (no empty records created).
+  #   * Otherwise → call `Mealie.get_or_create_food/1` / `get_or_create_unit/1`
+  #     and merge the returned id into the entry.
+  #
+  # On the first lookup failure the function short-circuits with the
+  # existing `{:error, %Error{}}` convention so the caller can fail the job
+  # through `fail_job/2`.
+  defp resolve_resolution_ids(resolutions) when is_map(resolutions) do
+    Enum.reduce_while(resolutions, {:ok, %{}}, fn {index, res}, {:ok, acc} ->
+      case enrich_resolution(res) do
+        {:ok, merged} -> {:cont, {:ok, Map.put(acc, index, merged)}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp enrich_resolution(res) when is_map(res) do
+    with {:ok, food_id} <- resolve_food_id(res),
+         {:ok, unit_id} <- resolve_unit_id(res) do
+      {:ok,
+       res
+       |> maybe_put_id("food_id", food_id)
+       |> maybe_put_id("unit_id", unit_id)}
+    end
+  end
+
+  # Returns `{:ok, id}` — `id` is `nil` when no lookup is needed (entry
+  # already has an explicit id, or the food value is blank/nil), or the
+  # id returned by the Mealie client on success. Errors propagate as-is.
+  defp resolve_food_id(res) when is_map(res) do
+    cond do
+      is_binary(res["food_id"]) ->
+        {:ok, res["food_id"]}
+
+      not (is_binary(res["food"]) and res["food"] != "") ->
+        {:ok, nil}
+
+      true ->
+        Mealie.get_or_create_food(res["food"])
+    end
+  end
+
+  defp resolve_unit_id(res) when is_map(res) do
+    cond do
+      is_binary(res["unit_id"]) ->
+        {:ok, res["unit_id"]}
+
+      not (is_binary(res["unit"]) and res["unit"] != "") ->
+        {:ok, nil}
+
+      true ->
+        Mealie.get_or_create_unit(res["unit"])
+    end
+  end
+
+  # Only set the id key when the lookup produced a non-nil value — preserves
+  # any existing key (including explicit `res["food_id"]`) when `nil`.
+  defp maybe_put_id(map, _key, nil), do: map
+  defp maybe_put_id(map, key, id), do: Map.put(map, key, id)
 
   # ---- stage handlers (handle_info) ----
   # Each stage runs in its own handle_info/2. The current stage is set to

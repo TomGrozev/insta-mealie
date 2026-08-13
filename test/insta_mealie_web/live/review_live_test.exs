@@ -66,10 +66,28 @@ defmodule InstaMealieWeb.ReviewLiveTest do
           {:ok, %{"slug" => slug}}
 
         method == :get and String.starts_with?(path, "/api/foods") ->
-          {:ok, %{"data" => ["mystery-spice", "paprika", "cumin"]}}
+          # Map-shaped responses so the review-resolution enrichment path
+          # (issue #29) can call `Mealie.get_or_create_food/1` without
+          # tripping `find_exact_food_id/2`'s `Map.get(result, "name")`.
+          # Names stay the same; the LiveView's `search_foods_safe/1`
+          # extracts the `"name"` field for dropdown display.
+          {:ok,
+           %{
+             "data" => [
+               %{"id" => "food-mystery-spice", "name" => "mystery-spice"},
+               %{"id" => "food-paprika", "name" => "paprika"},
+               %{"id" => "food-cumin", "name" => "cumin"}
+             ]
+           }}
 
         method == :get and String.starts_with?(path, "/api/units") ->
-          {:ok, %{"data" => ["cups", "tbsp"]}}
+          {:ok,
+           %{
+             "data" => [
+               %{"id" => "unit-cups", "name" => "cups"},
+               %{"id" => "unit-tbsp", "name" => "tbsp"}
+             ]
+           }}
 
         method == :get and String.starts_with?(path, "/api/organizers/") ->
           {:ok, %{"items" => []}}
@@ -90,6 +108,35 @@ defmodule InstaMealieWeb.ReviewLiveTest do
 
         method == :post and path == "/api/parser/ingredients" ->
           {:ok, parsed_ingredients}
+
+        # POST /api/foods and /api/units are reached by `Mealie.get_or_create_*`
+        # when the review-resolution enrichment needs a new food/unit
+        # (issue #29). Echo back deterministic ids derived from the name.
+        method == :post and path == "/api/foods" ->
+          name = body[:name] || body["name"] || "untitled-food"
+
+          id =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          id = if id == "", do: "untitled-food", else: id
+          {:ok, %{"id" => id, "name" => name}}
+
+        method == :post and path == "/api/units" ->
+          name = body[:name] || body["name"] || "untitled-unit"
+
+          id =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          id = if id == "", do: "untitled-unit", else: id
+          {:ok, %{"id" => id, "name" => name}}
 
         true ->
           {:ok, %{}}
@@ -127,10 +174,22 @@ defmodule InstaMealieWeb.ReviewLiveTest do
           {:ok, %{"slug" => slug}}
 
         method == :get and String.starts_with?(path, "/api/foods") ->
-          {:ok, %{"data" => ["paprika", "cumin"]}}
+          {:ok,
+           %{
+             "data" => [
+               %{"id" => "food-paprika", "name" => "paprika"},
+               %{"id" => "food-cumin", "name" => "cumin"}
+             ]
+           }}
 
         method == :get and String.starts_with?(path, "/api/units") ->
-          {:ok, %{"data" => ["cups", "tbsp"]}}
+          {:ok,
+           %{
+             "data" => [
+               %{"id" => "unit-cups", "name" => "cups"},
+               %{"id" => "unit-tbsp", "name" => "tbsp"}
+             ]
+           }}
 
         method == :get and String.starts_with?(path, "/api/organizers/") ->
           {:ok, %{"items" => []}}
@@ -152,6 +211,35 @@ defmodule InstaMealieWeb.ReviewLiveTest do
         method == :post and path == "/api/parser/ingredients" ->
           {:ok, parsed_ingredients}
 
+        # POST /api/foods and /api/units are reached by `Mealie.get_or_create_*`
+        # when the review-resolution enrichment needs a new food/unit
+        # (issue #29). Echo back deterministic ids derived from the name.
+        method == :post and path == "/api/foods" ->
+          name = body[:name] || body["name"] || "untitled-food"
+
+          id =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          id = if id == "", do: "untitled-food", else: id
+          {:ok, %{"id" => id, "name" => name}}
+
+        method == :post and path == "/api/units" ->
+          name = body[:name] || body["name"] || "untitled-unit"
+
+          id =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          id = if id == "", do: "untitled-unit", else: id
+          {:ok, %{"id" => id, "name" => name}}
+
         true ->
           {:ok, %{}}
       end
@@ -159,7 +247,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
   end
 
   defp review_validation_mealie_setup do
-    Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, _body ->
+    Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
       parsed_ingredients = [
         %{
           "quantity" => 3,
@@ -184,13 +272,60 @@ defmodule InstaMealieWeb.ReviewLiveTest do
           {:error, Error.new(:validation, "rejected", stage: :mealie_import)}
 
         method == :get and String.starts_with?(path, "/api/foods") ->
-          {:ok, %{"data" => ["mystery-spice", "paprika", "cumin"]}}
+          # Map-shaped responses so the review-resolution enrichment path
+          # (issue #29) can call `Mealie.get_or_create_food/1` without
+          # tripping `find_exact_food_id/2`'s `Map.get(result, "name")`.
+          # Names stay the same; the LiveView's `search_foods_safe/1`
+          # extracts the `"name"` field for dropdown display.
+          {:ok,
+           %{
+             "data" => [
+               %{"id" => "food-mystery-spice", "name" => "mystery-spice"},
+               %{"id" => "food-paprika", "name" => "paprika"},
+               %{"id" => "food-cumin", "name" => "cumin"}
+             ]
+           }}
 
         method == :get and String.starts_with?(path, "/api/units") ->
-          {:ok, %{"data" => ["cups", "tbsp"]}}
+          {:ok,
+           %{
+             "data" => [
+               %{"id" => "unit-cups", "name" => "cups"},
+               %{"id" => "unit-tbsp", "name" => "tbsp"}
+             ]
+           }}
 
         method == :post and path == "/api/parser/ingredients" ->
           {:ok, parsed_ingredients}
+
+        # POST /api/foods and /api/units are reached by `Mealie.get_or_create_*`
+        # when the review-resolution enrichment needs a new food/unit
+        # (issue #29). Echo back deterministic ids derived from the name.
+        method == :post and path == "/api/foods" ->
+          name = body[:name] || body["name"] || "untitled-food"
+
+          id =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          id = if id == "", do: "untitled-food", else: id
+          {:ok, %{"id" => id, "name" => name}}
+
+        method == :post and path == "/api/units" ->
+          name = body[:name] || body["name"] || "untitled-unit"
+
+          id =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          id = if id == "", do: "untitled-unit", else: id
+          {:ok, %{"id" => id, "name" => name}}
 
         true ->
           {:ok, %{}}
@@ -199,7 +334,7 @@ defmodule InstaMealieWeb.ReviewLiveTest do
   end
 
   defp review_network_mealie_setup do
-    Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, _body ->
+    Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
       parsed_ingredients = [
         %{
           "quantity" => 3,
@@ -224,13 +359,60 @@ defmodule InstaMealieWeb.ReviewLiveTest do
           {:error, Error.new(:network, "down", stage: :mealie_import)}
 
         method == :get and String.starts_with?(path, "/api/foods") ->
-          {:ok, %{"data" => ["mystery-spice", "paprika", "cumin"]}}
+          # Map-shaped responses so the review-resolution enrichment path
+          # (issue #29) can call `Mealie.get_or_create_food/1` without
+          # tripping `find_exact_food_id/2`'s `Map.get(result, "name")`.
+          # Names stay the same; the LiveView's `search_foods_safe/1`
+          # extracts the `"name"` field for dropdown display.
+          {:ok,
+           %{
+             "data" => [
+               %{"id" => "food-mystery-spice", "name" => "mystery-spice"},
+               %{"id" => "food-paprika", "name" => "paprika"},
+               %{"id" => "food-cumin", "name" => "cumin"}
+             ]
+           }}
 
         method == :get and String.starts_with?(path, "/api/units") ->
-          {:ok, %{"data" => ["cups", "tbsp"]}}
+          {:ok,
+           %{
+             "data" => [
+               %{"id" => "unit-cups", "name" => "cups"},
+               %{"id" => "unit-tbsp", "name" => "tbsp"}
+             ]
+           }}
 
         method == :post and path == "/api/parser/ingredients" ->
           {:ok, parsed_ingredients}
+
+        # POST /api/foods and /api/units are reached by `Mealie.get_or_create_*`
+        # when the review-resolution enrichment needs a new food/unit
+        # (issue #29). Echo back deterministic ids derived from the name.
+        method == :post and path == "/api/foods" ->
+          name = body[:name] || body["name"] || "untitled-food"
+
+          id =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          id = if id == "", do: "untitled-food", else: id
+          {:ok, %{"id" => id, "name" => name}}
+
+        method == :post and path == "/api/units" ->
+          name = body[:name] || body["name"] || "untitled-unit"
+
+          id =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          id = if id == "", do: "untitled-unit", else: id
+          {:ok, %{"id" => id, "name" => name}}
 
         true ->
           {:ok, %{}}
@@ -450,6 +632,106 @@ defmodule InstaMealieWeb.ReviewLiveTest do
 
       html = render(view)
       assert html =~ "Recipe imported!"
+
+      job = Pipeline.get_job(id)
+      assert job.state == :succeeded
+    end
+  end
+
+  describe "Custom food/unit create + assign regression — Issue 29 (public flow)" do
+    test "submitting custom food/unit names creates them via POST and assigns returned ids in PATCH recipeIngredient" do
+      # Capture every adapter invocation so the assertions below can inspect
+      # what the public review → import path actually emits at the wire
+      # boundary. Agent.update/2 from a single producer (the Job GenServer
+      # that owns the resolve/import path) arrives in call order; the
+      # filters below only need existence/count, not exact ordering.
+      {:ok, capture} = Agent.start_link(fn -> [] end)
+      on_exit(fn -> if Process.alive?(capture), do: Agent.stop(capture) end)
+
+      {id, _} =
+        start_review_job(fn ->
+          # Reuse review_mealie_setup/0 for the canonical response shapes,
+          # then re-wrap the adapter with capture so the existing dispatch
+          # logic stays untouched.
+          review_mealie_setup()
+          original = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+          Application.put_env(
+            :insta_mealie,
+            :mealie_http_adapter,
+            fn method, path, body ->
+              Agent.update(capture, fn calls -> [{method, path, body} | calls] end)
+              original.(method, path, body)
+            end
+          )
+        end)
+
+      view = mount_review_view(id)
+
+      # Names absent from the mocked GET /api/foods and /api/units search
+      # results, so Mealie.get_or_create_food/1 and get_or_create_unit/1
+      # take the POST branch and the resolved ids end up in the PATCH.
+      custom_food = "dragonfruit-bread"
+      custom_unit = "splash"
+
+      view
+      |> element("#review-import-form")
+      |> render_submit(%{
+        "review" => %{
+          "food_0" => custom_food,
+          "unit_0" => custom_unit
+        }
+      })
+
+      html = render(view)
+      assert html =~ "Recipe imported!"
+
+      calls = capture |> Agent.get(& &1) |> Enum.reverse()
+
+      # POST /api/foods received the submitted custom food name and was
+      # issued exactly once.
+      food_posts =
+        Enum.filter(calls, fn {m, p, _b} -> m == :post and p == "/api/foods" end)
+
+      assert length(food_posts) == 1
+      {_, _, food_body} = hd(food_posts)
+      assert food_body["name"] == custom_food
+
+      # POST /api/units received the submitted custom unit name and was
+      # issued exactly once.
+      unit_posts =
+        Enum.filter(calls, fn {m, p, _b} -> m == :post and p == "/api/units" end)
+
+      assert length(unit_posts) == 1
+      {_, _, unit_body} = hd(unit_posts)
+      assert unit_body["name"] == custom_unit
+
+      # The eventual PATCH /api/recipes/... carried recipeIngredient with
+      # the nested food/unit objects that use the ids returned from the
+      # create calls above — proving the resolved ids make it onto the
+      # wire, not just into the local recipe struct.
+      patch_call =
+        Enum.find(calls, fn {m, p, _b} ->
+          m == :patch and String.starts_with?(p, "/api/recipes/")
+        end)
+
+      assert patch_call, "expected a PATCH /api/recipes/... call"
+
+      {_, _, patch_body} = patch_call
+      ingredients = patch_body["recipeIngredient"]
+
+      assert is_list(ingredients)
+      assert [first_ingredient | _] = ingredients
+
+      assert first_ingredient["food"] == %{
+               "id" => custom_food,
+               "name" => custom_food
+             }
+
+      assert first_ingredient["unit"] == %{
+               "id" => custom_unit,
+               "name" => custom_unit
+             }
 
       job = Pipeline.get_job(id)
       assert job.state == :succeeded

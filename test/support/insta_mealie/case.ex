@@ -134,8 +134,39 @@ defmodule InstaMealie.TestCase do
         m == :get and String.starts_with?(p, "/api/foods") ->
           {:ok, %{"data" => []}}
 
+        # POST /api/foods is reached when the review resolution enriches a
+        # nonblank custom food name through `Mealie.get_or_create_food/1`
+        # (issue #29). The search above returns no match, so the create
+        # branch fires; echo back a deterministic id derived from the name
+        # so the resolved ingredient reaches the PATCH payload with an id.
+        m == :post and p == "/api/foods" ->
+          name = body[:name] || body["name"] || "untitled-food"
+
+          id =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          id = if id == "", do: "untitled-food", else: id
+          {:ok, %{"id" => id, "name" => name}}
+
         m == :get and String.starts_with?(p, "/api/units") ->
           {:ok, %{"data" => []}}
+
+        m == :post and p == "/api/units" ->
+          name = body[:name] || body["name"] || "untitled-unit"
+
+          id =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          id = if id == "", do: "untitled-unit", else: id
+          {:ok, %{"id" => id, "name" => name}}
 
         m == :get and String.starts_with?(p, "/api/organizers/") ->
           {:ok, %{"items" => []}}
