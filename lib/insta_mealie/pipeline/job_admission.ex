@@ -91,9 +91,12 @@ defmodule InstaMealie.Pipeline.JobAdmission do
 
   @impl true
   def handle_call({:cancel, job_id}, _from, state) do
-    {removed, new_queue} = :queue.filter(fn id -> id != job_id end, state.queue)
-    state = %{state | queue: new_queue}
-    {:reply, if(removed, do: :ok, else: :not_queued), state}
+    if :queue.member(job_id, state.queue) do
+      new_queue = :queue.filter(fn id -> id != job_id end, state.queue)
+      {:reply, :ok, %{state | queue: new_queue}}
+    else
+      {:reply, :not_queued, state}
+    end
   end
 
   @impl true
