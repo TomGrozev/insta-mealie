@@ -1,0 +1,8 @@
+export OPENAI_BASE_URL=
+export OPENAI_API_KEY=
+export OPENAI_MODEL=
+export WHISPER_BASE_URL=
+export WHISPER_API_KEY=
+export WHISPER_MODEL=
+export MEALIE_BASE_URL=
+export MEALIE_API_TOKEN=
