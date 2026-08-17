@@ -63,7 +63,11 @@ defmodule InstaMealie.MixProject do
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
-      {:mox, "~> 1.0", only: :test}
+      {:mox, "~> 1.0", only: :test},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false},
+      {:doctor, "~> 0.22", only: [:dev, :test], runtime: false},
+      {:git_hooks, "~> 0.8", only: [:dev], runtime: false}
     ]
   end
 
@@ -78,7 +82,15 @@ defmodule InstaMealie.MixProject do
         "esbuild insta_mealie --minify",
         "phx.digest"
       ],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: [
+        "compile --warnings-as-errors",
+        "deps.unlock --unused",
+        "format",
+        "credo",
+        "doctor --summary",
+        "sobelow",
+        "test"
+      ]
     ]
   end
 end
