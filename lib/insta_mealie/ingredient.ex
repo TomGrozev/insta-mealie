@@ -347,13 +347,21 @@ defmodule InstaMealie.Ingredient do
   @doc """
   Project a `%Ingredient{}` to a single string for LLM prompt consumption.
 
-  If `note` is a non-empty binary, the raw ingredient line is returned as-is
-  (unparsed ingredients have no structured fields to render). Otherwise the
-  non-nil `quantity`, `unit`, and `food` fields are stringified and joined
-  with a single space; if all are nil, the empty string is returned.
+  An ingredient is rendered as the raw `note` text (unparsed ingredients have
+  no structured fields to render) only when its `status` is `:unparsed`. For
+  every other status (`:parsed`, `:needs_review`, `:resolved`) the non-nil
+  `quantity`, `unit`, and `food` fields are stringified and joined with a
+  single space. If all of those are nil, the empty string is returned.
+
+  Note that a populated `note` alone is NOT sufficient to trigger the raw
+  fallback: the Mealie parser also emits a per-ingredient note (e.g.
+  "sifted", "room temperature") for fully classified lines, and dropping the
+  structured join for those would silently lose quantity/unit/food from the
+  downstream prompt projection.
   """
   @spec to_prompt_string(t()) :: String.t()
-  def to_prompt_string(%__MODULE__{note: note}) when is_binary(note) and note != "" do
+  def to_prompt_string(%__MODULE__{status: :unparsed, note: note})
+      when is_binary(note) and note != "" do
     note
   end
 

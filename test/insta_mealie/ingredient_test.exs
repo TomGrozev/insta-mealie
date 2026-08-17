@@ -84,4 +84,67 @@ defmodule InstaMealie.IngredientTest do
       assert Ingredient.needs_review?(ing)
     end
   end
+
+  describe "to_prompt_string/1 — parsed ingredients with a parser-supplied note" do
+    test "renders the structured quantity/unit/food join, NOT the note (regression: status must gate the raw-note fallback)" do
+      # The Mealie parser emits a per-ingredient "note" (e.g. "sifted",
+      # "room temperature") even when it has fully classified the line.
+      # `to_prompt_string/1` must NOT treat a populated note as a signal to
+      # skip the structured join — that would silently drop quantity/unit/food
+      # from the `llm_merge` prompt projection.
+      ing = %Ingredient{
+        quantity: 2,
+        food: %Ref{name: "flour", id: "food-flour", confidence: 0.97},
+        unit: %Ref{name: "cup", id: "unit-cup", confidence: 0.98},
+        note: "sifted",
+        raw: "2 cups flour, sifted",
+        status: :parsed
+      }
+
+      assert Ingredient.to_prompt_string(ing) == "2 cup flour"
+    end
+
+    test "renders the structured join when status is :needs_review even with a non-empty note" do
+      ing = %Ingredient{
+        quantity: 1,
+        food: %Ref{name: "butter", id: nil, confidence: 0.5},
+        unit: %Ref{name: "cup", id: "unit-cup", confidence: 0.9},
+        note: "room temperature",
+        status: :needs_review
+      }
+
+      assert Ingredient.to_prompt_string(ing) == "1 cup butter"
+    end
+
+    test "renders the structured join when status is :resolved even with a non-empty note" do
+      ing = %Ingredient{
+        quantity: 3,
+        food: %Ref{name: "eggs", id: "food-eggs", confidence: nil},
+        unit: %Ref{name: nil, id: nil, confidence: nil},
+        note: "large",
+        status: :resolved
+      }
+
+      assert Ingredient.to_prompt_string(ing) == "3 eggs"
+    end
+  end
+
+  describe "to_prompt_string/1 — :unparsed ingredients" do
+    test "renders the raw note text as-is when status is :unparsed" do
+      ing = %Ingredient{
+        note: "a pinch of something the parser refused to classify",
+        raw: "a pinch of something the parser refused to classify",
+        status: :unparsed
+      }
+
+      assert Ingredient.to_prompt_string(ing) ==
+               "a pinch of something the parser refused to classify"
+    end
+
+    test "renders the empty string when an :unparsed ingredient has no note" do
+      ing = %Ingredient{status: :unparsed}
+
+      assert Ingredient.to_prompt_string(ing) == ""
+    end
+  end
 end
