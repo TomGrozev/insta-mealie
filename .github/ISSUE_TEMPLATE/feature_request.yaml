@@ -1,0 +1,73 @@
+---
+name: Feature request
+description: Suggest an idea for InstaMealie
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        **NOTE:** This form is only for submitting well-formed proposals to extend or modify
+        InstaMealie. If you're trying to solve a problem but can't figure out how, or if you
+        still need time to work out the details of a proposed new feature, please start a
+        [discussion](https://github.com/TomGrozev/insta-mealie/discussions) instead.
+  - type: dropdown
+    attributes:
+      label: Feature type
+      options:
+        - API change
+        - New functionality
+        - Change to existing functionality
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: Pipeline area
+      description: Which part of the pipeline does this affect? (Pick the closest match.)
+      options:
+        - Cross-pipeline
+        - fetch
+        - llm_format
+        - scrape_link
+        - transcribe
+        - llm_merge
+        - mealie_import
+        - UI / LiveView
+        - Deployment / Docker
+        - Not pipeline-related
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed functionality
+      description: >
+        Describe in detail the new feature or behavior you are proposing. Include any specific
+        changes to pipeline stages, schema, UI flows, and/or configuration. The more detail you
+        provide here, the greater chance your proposal has of being discussed. Feature requests
+        which don't include an actionable implementation plan will be rejected.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Use case
+      description: >
+        Explain how adding this functionality would benefit InstaMealie users. What need does
+        it address?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Configuration changes
+      description: >
+        Note any new or changed environment variables, defaults, or deployment knobs this
+        feature would introduce.
+  - type: textarea
+    attributes:
+      label: External dependencies
+      description: >
+        List any new dependencies on external libraries or services that this new feature
+        would introduce. For example, does the proposal require a new Hex package, a new
+        external API, or a new model? (Not all new features introduce new dependencies.)
+  - type: textarea
+    attributes:
+      label: Additional Context
+      description: Any additional information

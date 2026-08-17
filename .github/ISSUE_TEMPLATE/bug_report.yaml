@@ -1,0 +1,87 @@
+---
+name: Bug report
+description: Report a reproducible bug in the current release of InstaMealie
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        **NOTE:** This form is only for reporting _reproducible bugs_ in the current
+        InstaMealie release. If you're having trouble with installation or just
+        looking for assistance using InstaMealie, please open a
+        [discussion](https://github.com/TomGrozev/insta-mealie/discussions) instead.
+  - type: input
+    attributes:
+      label: InstaMealie version
+      description: What commit / image tag of InstaMealie are you currently running?
+      placeholder: main (commit abc1234) / ghcr.io/tomgrozev/insta-mealie:latest
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Elixir and OTP version
+      description: What version of Elixir and OTP are you currently running? (For Docker users, omit this.)
+      placeholder: 1.17.3 / OTP 27.2
+    validations:
+      required: false
+  - type: dropdown
+    attributes:
+      label: Pipeline stage where the bug occurred
+      description: Which pipeline stage produced the failure? (Leave as "Unknown" if unsure.)
+      options:
+        - Unknown
+        - fetch
+        - llm_format
+        - scrape_link
+        - transcribe
+        - llm_merge
+        - mealie_import
+        - Other / not a job failure
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Reel URL
+      description: The Instagram reel URL that triggered the bug (if applicable).
+      placeholder: https://www.instagram.com/reel/...
+    validations:
+      required: false
+  - type: input
+    attributes:
+      label: Mealie instance
+      description: The Mealie instance URL and group slug you were importing into.
+      placeholder: "http://localhost:9000 (group: home)"
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: Steps to Reproduce
+      description: >
+        Describe in detail the exact steps that someone else can take to
+        reproduce this bug against the current `main` branch. Include the
+        environment variables you've set (omit secret values) and the reel or
+        caption used.
+      placeholder: |
+        1. Set OPENAI_API_KEY and MEALIE_API_TOKEN
+        2. Paste a reel URL into the form
+        3. Observe the failure on the mealie_import stage
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+      placeholder: The recipe should import to Mealie with a deep link
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Observed Behavior
+      description: What happened instead? Paste any relevant server logs (redact secrets).
+      placeholder: An error class "api_error" was raised at mealie_import
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Additional Context
+      description: Any additional information (e.g. yt-dlp version, Mealie version, browser console output)
