@@ -138,6 +138,15 @@ defmodule InstaMealieWeb.ReviewLiveTest do
           id = if id == "", do: "untitled-unit", else: id
           {:ok, %{"id" => id, "name" => name}}
 
+        # `Mealie.import_recipe/1` does `GET /api/recipes/{slug}` first; a
+        # 404 there means "recipe doesn't exist yet — create one" (the
+        # `:not_found` class is what gates the create branch after the
+        # bug 1 fix). The stub mirrors what `InstaMealie.HttpClassify`
+        # produces from a real 404.
+        method == :get and String.starts_with?(path, "/api/recipes/") and
+            not String.ends_with?(path, "/image") ->
+          {:error, Error.new(:not_found, "not found")}
+
         true ->
           {:ok, %{}}
       end
@@ -240,6 +249,15 @@ defmodule InstaMealieWeb.ReviewLiveTest do
           id = if id == "", do: "untitled-unit", else: id
           {:ok, %{"id" => id, "name" => name}}
 
+        # `Mealie.import_recipe/1` does `GET /api/recipes/{slug}` first; a
+        # 404 there means "recipe doesn't exist yet — create one" (the
+        # `:not_found` class is what gates the create branch after the
+        # bug 1 fix). The stub mirrors what `InstaMealie.HttpClassify`
+        # produces from a real 404.
+        method == :get and String.starts_with?(path, "/api/recipes/") and
+            not String.ends_with?(path, "/image") ->
+          {:error, Error.new(:not_found, "not found")}
+
         true ->
           {:ok, %{}}
       end
@@ -326,6 +344,15 @@ defmodule InstaMealieWeb.ReviewLiveTest do
 
           id = if id == "", do: "untitled-unit", else: id
           {:ok, %{"id" => id, "name" => name}}
+
+        # `Mealie.import_recipe/1` does `GET /api/recipes/{slug}` first; a
+        # 404 there means "recipe doesn't exist yet — create one" (the
+        # `:not_found` class is what gates the create branch after the
+        # bug 1 fix). The stub mirrors what `InstaMealie.HttpClassify`
+        # produces from a real 404.
+        method == :get and String.starts_with?(path, "/api/recipes/") and
+            not String.ends_with?(path, "/image") ->
+          {:error, Error.new(:not_found, "not found")}
 
         true ->
           {:ok, %{}}
@@ -414,7 +441,288 @@ defmodule InstaMealieWeb.ReviewLiveTest do
           id = if id == "", do: "untitled-unit", else: id
           {:ok, %{"id" => id, "name" => name}}
 
+        # `Mealie.import_recipe/1` does `GET /api/recipes/{slug}` first; a
+        # 404 there means "recipe doesn't exist yet — create one" (the
+        # `:not_found` class is what gates the create branch after the
+        # bug 1 fix). The stub mirrors what `InstaMealie.HttpClassify`
+        # produces from a real 404.
+        method == :get and String.starts_with?(path, "/api/recipes/") and
+            not String.ends_with?(path, "/image") ->
+          {:error, Error.new(:not_found, "not found")}
+
         true ->
+          {:ok, %{}}
+      end
+    end)
+  end
+
+  # Setup for bug 1 / bug 2 regression: the Mealie import POST returns
+  # `:auth`. `:auth` is NOT in `Error.retryable?/1`'s set, so the review
+  # page must route the user to the terminal "no more retries" panel
+  # rather than offering a Retry button that would just re-attempt the
+  # same doomed import.
+  defp review_auth_mealie_setup do
+    Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
+      parsed_ingredients = [
+        %{
+          "quantity" => 3,
+          "unit" => %{"name" => "cups", "id" => "unit-cups"},
+          "food" => %{
+            "name" => "mystery-spice",
+            "id" => nil,
+            "confidence" => 0.3
+          },
+          "note" => nil
+        },
+        %{
+          "quantity" => nil,
+          "unit" => %{"name" => nil, "id" => "unit-1"},
+          "food" => %{"name" => "paprika", "id" => "food-1", "confidence" => 1.0},
+          "note" => nil
+        },
+        %{
+          "quantity" => nil,
+          "unit" => %{"name" => nil, "id" => "unit-1"},
+          "food" => %{"name" => "cumin", "id" => "food-2", "confidence" => 1.0},
+          "note" => nil
+        }
+      ]
+
+      cond do
+        method == :post and path == "/api/recipes" ->
+          {:error, Error.new(:auth, "mealie token rejected", stage: :mealie_import)}
+
+        method == :get and String.starts_with?(path, "/api/foods") ->
+          {:ok,
+           %{
+             "data" => [
+               %{"id" => "food-mystery-spice", "name" => "mystery-spice"},
+               %{"id" => "food-paprika", "name" => "paprika"},
+               %{"id" => "food-cumin", "name" => "cumin"}
+             ]
+           }}
+
+        method == :get and String.starts_with?(path, "/api/units") ->
+          {:ok,
+           %{
+             "data" => [
+               %{"id" => "unit-cups", "name" => "cups"},
+               %{"id" => "unit-tbsp", "name" => "tbsp"}
+             ]
+           }}
+
+        method == :post and path == "/api/parser/ingredients" ->
+          {:ok, parsed_ingredients}
+
+        method == :post and path == "/api/foods" ->
+          name = body[:name] || body["name"] || "untitled-food"
+
+          id =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          id = if id == "", do: "untitled-food", else: id
+          {:ok, %{"id" => id, "name" => name}}
+
+        method == :post and path == "/api/units" ->
+          name = body[:name] || body["name"] || "untitled-unit"
+
+          id =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          id = if id == "", do: "untitled-unit", else: id
+          {:ok, %{"id" => id, "name" => name}}
+
+        method == :get and String.starts_with?(path, "/api/recipes/") and
+            not String.ends_with?(path, "/image") ->
+          {:error, Error.new(:not_found, "not found")}
+
+        true ->
+          {:ok, %{}}
+      end
+    end)
+  end
+
+  # Setup for bug 1 regression: the first Mealie POST returns `:network`
+  # (retryable), and subsequent POSTs return `:auth` (non-retryable). The
+  # `Agent` counter is local to the test process and tracks how many POSTs
+  # the adapter has handled so far; the on_exit hook keeps the test
+  # supervisor from leaking it between tests.
+  defp review_network_then_auth_mealie_setup do
+    {:ok, counter} = Agent.start_link(fn -> %{post_count: 0} end)
+    on_exit(fn -> if Process.alive?(counter), do: Agent.stop(counter) end)
+
+    Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
+      parsed_ingredients = [
+        %{
+          "quantity" => 3,
+          "unit" => %{"name" => "cups", "id" => "unit-cups"},
+          "food" => %{
+            "name" => "mystery-spice",
+            "id" => nil,
+            "confidence" => 0.3
+          },
+          "note" => nil
+        },
+        %{
+          "quantity" => nil,
+          "unit" => %{"name" => nil, "id" => "unit-1"},
+          "food" => %{"name" => "paprika", "id" => "food-1", "confidence" => 1.0},
+          "note" => nil
+        },
+        %{
+          "quantity" => nil,
+          "unit" => %{"name" => nil, "id" => "unit-1"},
+          "food" => %{"name" => "cumin", "id" => "food-2", "confidence" => 1.0},
+          "note" => nil
+        }
+      ]
+
+      cond do
+        method == :post and path == "/api/recipes" ->
+          Agent.update(counter, fn c -> %{c | post_count: c.post_count + 1} end)
+          post_count = Agent.get(counter, & &1.post_count)
+
+          if post_count == 1 do
+            {:error, Error.new(:network, "down", stage: :mealie_import)}
+          else
+            {:error, Error.new(:auth, "mealie token rejected", stage: :mealie_import)}
+          end
+
+        method == :get and String.starts_with?(path, "/api/foods") ->
+          {:ok,
+           %{
+             "data" => [
+               %{"id" => "food-mystery-spice", "name" => "mystery-spice"},
+               %{"id" => "food-paprika", "name" => "paprika"},
+               %{"id" => "food-cumin", "name" => "cumin"}
+             ]
+           }}
+
+        method == :get and String.starts_with?(path, "/api/units") ->
+          {:ok,
+           %{
+             "data" => [
+               %{"id" => "unit-cups", "name" => "cups"},
+               %{"id" => "unit-tbsp", "name" => "tbsp"}
+             ]
+           }}
+
+        method == :post and path == "/api/parser/ingredients" ->
+          {:ok, parsed_ingredients}
+
+        method == :post and path == "/api/foods" ->
+          name = body[:name] || body["name"] || "untitled-food"
+
+          id =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          id = if id == "", do: "untitled-food", else: id
+          {:ok, %{"id" => id, "name" => name}}
+
+        method == :post and path == "/api/units" ->
+          name = body[:name] || body["name"] || "untitled-unit"
+
+          id =
+            name
+            |> String.downcase()
+            |> String.normalize(:nfd)
+            |> String.replace(~r/[^a-z0-9]+/u, "-")
+            |> String.trim("-")
+
+          id = if id == "", do: "untitled-unit", else: id
+          {:ok, %{"id" => id, "name" => name}}
+
+        method == :get and String.starts_with?(path, "/api/recipes/") and
+            not String.ends_with?(path, "/image") ->
+          {:error, Error.new(:not_found, "not found")}
+
+        true ->
+          {:ok, %{}}
+      end
+    end)
+  end
+
+  # Minimal stub for the formatted_quantity_unit/2 truth-table regression
+  # test below. Only the parser POST, the food search GET, and the unit
+  # search GET are exercised — the test mounts the review view and reads
+  # the rendered HTML, so no recipe POST/PATCH import flow is needed.
+  defp quantity_no_unit_mealie_setup do
+    Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, _body ->
+      case {method, path} do
+        {:get, "/api/foods"} ->
+          {:ok,
+           %{
+             "data" => [
+               %{"id" => "food-apples", "name" => "apples"},
+               %{"id" => "food-bananas", "name" => "bananas"},
+               %{"id" => "food-cherries", "name" => "cherries"},
+               %{"id" => "food-dates", "name" => "dates"}
+             ]
+           }}
+
+        {:get, "/api/units"} ->
+          {:ok,
+           %{
+             "data" => [
+               %{"id" => "unit-cups", "name" => "cups"},
+               %{"id" => "unit-tsp", "name" => "tsp"}
+             ]
+           }}
+
+        {:post, "/api/parser/ingredients"} ->
+          # Four ingredients covering every row of the
+          # formatted_quantity_unit/2 truth table:
+          #   - quantity=2, unit="cups"  → "2 cups"  (row 1)
+          #   - quantity=5, unit=nil     → "5"       (row 2 — the bug)
+          #   - quantity=nil, unit="tsp" → "tsp"     (row 3)
+          #   - quantity=nil, unit=nil   → ""        (row 4)
+          #
+          # The "apples" row has a low-confidence / un-resolved food so the
+          # pipeline transitions to :needs_review (one unknown ingredient
+          # is enough). The preview chip still shows "2 cups" for that row
+          # — the bug under test is about the quantity_unit rendering, not
+          # the review gate.
+          {:ok,
+           [
+             %{
+               "quantity" => 2,
+               "unit" => %{"name" => "cups", "id" => "unit-cups"},
+               "food" => %{"name" => "apples", "id" => nil, "confidence" => 0.3},
+               "note" => nil
+             },
+             %{
+               "quantity" => 5,
+               "unit" => nil,
+               "food" => %{"name" => "bananas", "id" => "food-bananas", "confidence" => 1.0},
+               "note" => nil
+             },
+             %{
+               "quantity" => nil,
+               "unit" => %{"name" => "tsp", "id" => "unit-tsp"},
+               "food" => %{"name" => "cherries", "id" => "food-cherries", "confidence" => 1.0},
+               "note" => nil
+             },
+             %{
+               "quantity" => nil,
+               "unit" => nil,
+               "food" => %{"name" => "dates", "id" => "food-dates", "confidence" => 1.0},
+               "note" => nil
+             }
+           ]}
+
+        _ ->
           {:ok, %{}}
       end
     end)
@@ -530,15 +838,167 @@ defmodule InstaMealieWeb.ReviewLiveTest do
 
       html = render(view)
       assert html =~ "Import error"
+      assert has_element?(view, "#retry-review")
 
-      # Swap mealie stub to default success for the retry
+      # Swap mealie stub to default success for the retry.
       review_mealie_setup()
 
-      Pipeline.retry(id)
+      # Drive the retry through the LiveView event — exercising the same
+      # code path the user does. This is the path bug 1's 3-tuple
+      # CaseClauseError used to crash; rendering must succeed.
+      view |> element("#retry-review") |> render_click()
+      assert_receive {:job_updated, %Job{id: ^id, state: :succeeded}}, 5000
+
       job = Pipeline.get_job(id)
       assert job.state == :succeeded
       assert job.state != :needs_review
       assert job.deep_link =~ "edit=true"
+
+      html = render(view)
+      assert html =~ "Recipe imported!"
+      refute has_element?(view, "#retry-review")
+    end
+  end
+
+  describe "Retry on retryable %Error{} (bug 1)" do
+    test "clicking retry when the re-attempt also fails with :network shows the retryable error panel and keeps the CTA" do
+      {id, _} =
+        start_review_job(fn -> review_network_mealie_setup() end)
+
+      view = mount_review_view(id)
+
+      view
+      |> element("#review-import-form")
+      |> render_submit(%{
+        "food_0" => "paprika",
+        "unit_0" => "cups"
+      })
+
+      html = render(view)
+      assert html =~ "Import error"
+      assert has_element?(view, "#retry-review")
+
+      # Same network stub is still active — the re-attempt will also fail
+      # with {:error, %Error{class: :network}} (retryable). Previously the
+      # `{:error, class, _reason}` 3-tuple clause raised CaseClauseError
+      # and crashed the LiveView.
+      view |> element("#retry-review") |> render_click()
+      assert_receive {:job_updated, %Job{id: ^id, state: :failed}}, 5000
+
+      html = render(view)
+
+      # Still in the retryable-error branch: import_error is set, retry
+      # button is still present, no terminal panel.
+      assert html =~ "Import error"
+      assert html =~ "network"
+      assert has_element?(view, "#retry-review")
+      refute html =~ "Import failed"
+    end
+  end
+
+  describe "Retry on non-retryable %Error{} (bug 1)" do
+    test "clicking retry when the re-attempt fails with :auth routes to the terminal panel without crashing" do
+      {id, _} =
+        start_review_job(fn -> review_network_then_auth_mealie_setup() end)
+
+      view = mount_review_view(id)
+
+      view
+      |> element("#review-import-form")
+      |> render_submit(%{
+        "food_0" => "paprika",
+        "unit_0" => "cups"
+      })
+
+      html = render(view)
+      assert html =~ "Import error"
+      assert has_element?(view, "#retry-review")
+
+      # The adapter returns :network on the first POST and :auth on every
+      # subsequent POST. Clicking retry therefore re-attempts with an
+      # `:auth` outcome — a non-retryable %Error{} — and the LiveView must
+      # route to the terminal panel rather than crashing.
+      view |> element("#retry-review") |> render_click()
+      assert_receive {:job_updated, %Job{id: ^id, state: :failed}}, 5000
+
+      html = render(view)
+      assert html =~ "Import failed"
+      refute has_element?(view, "#retry-review")
+    end
+  end
+
+  describe "Retry cap reached (bug 1)" do
+    test "clicking retry past the per-stage cap routes to the terminal panel without crashing" do
+      {id, _} =
+        start_review_job(fn -> review_network_mealie_setup() end)
+
+      view = mount_review_view(id)
+
+      view
+      |> element("#review-import-form")
+      |> render_submit(%{
+        "food_0" => "paprika",
+        "unit_0" => "cups"
+      })
+
+      html = render(view)
+      assert html =~ "Import error"
+      assert has_element?(view, "#retry-review")
+
+      # The retry cap is 2 per stage. The mealie_import stage's retry_count
+      # is incremented on each `Pipeline.retry/1` call, regardless of the
+      # outcome. After two retries (retry_count = 2, retries_left = 0),
+      # the next click must surface `{:error, :retry_cap_exceeded}` —
+      # previously a `CaseClauseError` crash, now routed to the terminal
+      # panel via the `:dead` assign.
+      view |> element("#retry-review") |> render_click()
+      assert_receive {:job_updated, %Job{id: ^id, state: :failed}}, 5000
+      html = render(view)
+      assert html =~ "Import error"
+      assert has_element?(view, "#retry-review")
+
+      view |> element("#retry-review") |> render_click()
+      assert_receive {:job_updated, %Job{id: ^id, state: :failed}}, 5000
+      html = render(view)
+      assert html =~ "Import error"
+      assert has_element?(view, "#retry-review")
+
+      # The cap is now exhausted. Pipeline.retry/1 returns
+      # `{:error, :retry_cap_exceeded}`. The LiveView must not crash and
+      # must route to the terminal "Import failed" panel.
+      view |> element("#retry-review") |> render_click()
+
+      html = render(view)
+      assert html =~ "Import failed"
+      refute has_element?(view, "#retry-review")
+
+      job = Pipeline.get_job(id)
+      assert job.state == :failed
+      assert job.error_class == :network
+    end
+  end
+
+  describe "Initial ingredient submission with :auth (bug 2)" do
+    test "submit fails with :auth shows the terminal panel (no Retry CTA)" do
+      {id, _} =
+        start_review_job(fn -> review_auth_mealie_setup() end)
+
+      view = mount_review_view(id)
+
+      view
+      |> element("#review-import-form")
+      |> render_submit(%{
+        "food_0" => "paprika",
+        "unit_0" => "cups"
+      })
+
+      html = render(view)
+      assert html =~ "Import failed"
+      refute has_element?(view, "#retry-review")
+
+      job = Pipeline.get_job(id)
+      assert job.state == :failed
+      assert job.error_class == :auth
     end
   end
 
@@ -735,6 +1195,46 @@ defmodule InstaMealieWeb.ReviewLiveTest do
 
       job = Pipeline.get_job(id)
       assert job.state == :succeeded
+    end
+  end
+
+  describe "Quantity/no-unit preview (regression: formatted_quantity_unit/2)" do
+    test "an ingredient with quantity but no unit shows the quantity in the 'Will import as' preview chip" do
+      {id, _} = start_review_job(fn -> quantity_no_unit_mealie_setup() end)
+      view = mount_review_view(id)
+      html = render(view)
+
+      # The preview chip is the <span class="... bg-base-300/40 ..."> that
+      # receives `formatted_quantity_unit/2`'s return value. Each row below
+      # pins one truth-table cell so the regression stays scoped to the
+      # function being fixed.
+      chip = "span.bg-base-300\\/40"
+
+      # Row 1: quantity=2, unit="cups" → "2 cups" (unchanged control).
+      assert has_element?(view, chip, "2 cups")
+
+      # Row 2: quantity=5, unit=nil → "5" (THE BUG — the old nil-unit guard
+      # in `formatted_quantity_unit/2` short-circuited and dropped the
+      # quantity entirely, so the chip never rendered).
+      assert has_element?(view, chip, "5")
+
+      # Distinguish "5" from a naive fix that produces "5 " (trailing space).
+      # The HEEX template wraps the value with leading/trailing whitespace
+      # (newlines + spaces), so the rendered text node is "\n  5\n  ".
+      # A trailing space in the value would insert an extra space before
+      # that trailing newline: "\n  5 \n  ". The regex below requires "5"
+      # to be followed immediately by a newline (i.e. the template
+      # whitespace), with no space character in between.
+      assert html =~
+               ~r/<span class="rounded-md bg-base-300\/40 px-1\.5[^"]*">\s*5\n\s*<\/span>/
+
+      # Row 3: quantity=nil, unit="tsp" → "tsp" (unchanged control).
+      assert has_element?(view, chip, "tsp")
+
+      # Row 4: quantity=nil, unit=nil → "" (no chip rendered for this row).
+      # The food "dates" still appears in the preview, but only inside the
+      # food-name span — never inside the quantity_unit chip.
+      refute has_element?(view, chip, "dates")
     end
   end
 end

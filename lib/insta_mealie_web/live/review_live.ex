@@ -104,13 +104,8 @@ defmodule InstaMealieWeb.ReviewLive do
 
         {:noreply, socket}
 
-      {:error, %Error{class: class}} when class in [:network, :auth] ->
-        socket = assign(socket, :import_error, class)
-        {:noreply, socket}
-
-      {:error, _} ->
-        socket = assign(socket, :dead, true)
-        {:noreply, socket}
+      {:error, %Error{} = error} ->
+        {:noreply, import_error_socket(socket, error)}
     end
   end
 
@@ -218,9 +213,24 @@ defmodule InstaMealieWeb.ReviewLive do
 
         {:noreply, socket}
 
-      {:error, class, _reason} ->
-        socket = assign(socket, :import_error, class)
-        {:noreply, socket}
+      # The mealie_import fast path can fail with a structured %Error{} —
+      # route via the same retryable-vs-terminal helper the import handler
+      # uses so a retryable class keeps the Retry CTA visible and a
+      # non-retryable class (`:auth`, `:validation`, …) drops the user on
+      # the terminal "no more retries" panel.
+      {:error, %Error{} = error} ->
+        {:noreply, import_error_socket(socket, error)}
+
+      # The per-stage retry budget is exhausted (or the ETS row was
+      # TTL-evicted while the user clicked). Both are terminal — there's
+      # nothing left to retry against — so route to the `:dead` panel,
+      # matching the module's own docstring that this assign means "the
+      # Retry CTA is hidden".
+      {:error, :retry_cap_exceeded} ->
+        {:noreply, assign(socket, :dead, true)}
+
+      {:error, :not_found} ->
+        {:noreply, assign(socket, :dead, true)}
     end
   end
 
@@ -231,6 +241,26 @@ defmodule InstaMealieWeb.ReviewLive do
       Map.get(params, key, fallback)
     else
       nested
+    end
+  end
+
+  # Assigns the socket for a failed import based on the error's
+  # retryability (single source of truth shared by the initial-submit
+  # handler and the retry-review handler).
+  #
+  #   * Retryable classes (`:network`, `:timeout`, `:rate_limited`,
+  #     `:ip_banned`, `:cookie_expired`, `:api_error`) — keep the user on
+  #     the "Import error" panel so the Retry CTA stays visible.
+  #   * Everything else (`:auth`, `:validation`, …) — terminal, no point
+  #     offering another click; flip to the "Import failed" panel via the
+  #     `:dead` assign.
+  defp import_error_socket(socket, %Error{} = error) do
+    if Error.retryable?(error) do
+      assign(socket, :import_error, error.class)
+    else
+      socket
+      |> assign(:dead, true)
+      |> assign(:import_error, nil)
     end
   end
 
@@ -931,11 +961,15 @@ defmodule InstaMealieWeb.ReviewLive do
     }
   end
 
-  defp formatted_quantity_unit(_quantity, unit) when unit == "" or unit == nil, do: ""
-
   defp formatted_quantity_unit(quantity, unit) do
     formatted_quantity = format_quantity(quantity)
-    if formatted_quantity != "", do: formatted_quantity <> " " <> unit, else: unit
+
+    case {formatted_quantity, unit} do
+      {"", ""} -> ""
+      {"", unit} -> unit
+      {quantity, ""} -> quantity
+      {quantity, unit} -> quantity <> " " <> unit
+    end
   end
 
   defp format_quantity(nil), do: ""
