@@ -9,12 +9,22 @@ defmodule InstaMealie.Pipeline.Sweeper do
   @impl true
   def init(:ok) do
     JobStore.create_table()
+    schedule_sweep()
+    {:ok, %{}}
+  end
 
+  @impl true
+  def handle_info(:sweep, state) do
+    JobStore.sweep()
+    schedule_sweep()
+    {:noreply, state}
+  end
+
+  defp schedule_sweep do
     interval =
       Application.get_env(:insta_mealie, InstaMealie.Pipeline, [])[:sweep_interval_ms] ||
         5 * 60 * 1000
 
-    :timer.apply_interval(interval, JobStore, :sweep, [])
-    {:ok, :ok}
+    Process.send_after(self(), :sweep, interval)
   end
 end

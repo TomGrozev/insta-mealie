@@ -1,6 +1,8 @@
 defmodule InstaMealieWeb.JobsLiveErrorTest do
   use InstaMealie.TestCase
 
+  @moduletag capture_log: true
+
   import Phoenix.LiveViewTest
   import Phoenix.ConnTest
 
@@ -163,14 +165,16 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     test "mealie_import/validation: dead row (no CTAs)" do
       {id, _} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
+          prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, body ->
             case {m, p} do
               {:post, "/api/recipes"} ->
                 {:error,
                  Error.new(:validation, "mealie rejected the recipe", stage: :mealie_import)}
 
               _ ->
-                {:ok, %{}}
+                prev.(m, p, body)
             end
           end)
         end)
@@ -188,13 +192,15 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     test "mealie_import/api_error: retry shown (client error is retryable)" do
       {id, _} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
+          prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, body ->
             case {m, p} do
               {:post, "/api/recipes"} ->
                 {:error, Error.new(:api_error, "mealie returned HTTP 400", stage: :mealie_import)}
 
               _ ->
-                {:ok, %{}}
+                prev.(m, p, body)
             end
           end)
         end)
@@ -208,13 +214,15 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     test "mealie_import/api_error: clicking retry consumes attempt and updates UI" do
       {id, job} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
+          prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, body ->
             case {m, p} do
               {:post, "/api/recipes"} ->
                 {:error, Error.new(:api_error, "mealie returned HTTP 400", stage: :mealie_import)}
 
               _ ->
-                {:ok, %{}}
+                prev.(m, p, body)
             end
           end)
         end)
@@ -238,13 +246,15 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     test "mealie_import/network: retry shown (network is retryable)" do
       {id, _} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
+          prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, body ->
             case {m, p} do
               {:post, "/api/recipes"} ->
                 {:error, Error.new(:network, "mealie is down", stage: :mealie_import)}
 
               _ ->
-                {:ok, %{}}
+                prev.(m, p, body)
             end
           end)
         end)
@@ -258,13 +268,15 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
     test "mealie_import/auth: dead row (no CTAs)" do
       {id, _} =
         start_failed_job(fn ->
-          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, _body ->
+          prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+          Application.put_env(:insta_mealie, :mealie_http_adapter, fn m, p, body ->
             case {m, p} do
               {:post, "/api/recipes"} ->
                 {:error, Error.new(:auth, "mealie token rejected", stage: :mealie_import)}
 
               _ ->
-                {:ok, %{}}
+                prev.(m, p, body)
             end
           end)
         end)
@@ -335,14 +347,20 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
              }}
           end)
 
-          Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, _body ->
+          prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+          Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
             case {method, path} do
               {:get, "/api/recipes/retryable"} ->
                 # The draft exists only after the first POST has created it.
                 post_count = Agent.get(counter, & &1.post)
 
                 if post_count == 0 do
-                  {:error, Error.new(:api_error, "not found")}
+                  # `InstaMealie.HttpClassify.classify(404)` returns
+                  # `Error{class: :not_found, ...}` — the create-recipe gate
+                  # in `maybe_create_recipe/2` only opens on `:not_found`,
+                  # so the stub must match the real classifier output.
+                  {:error, Error.new(:not_found, "not found")}
                 else
                   {:ok, %{"slug" => "retryable"}}
                 end
@@ -362,7 +380,7 @@ defmodule InstaMealieWeb.JobsLiveErrorTest do
                 end
 
               _ ->
-                {:ok, %{}}
+                prev.(method, path, body)
             end
           end)
         end)

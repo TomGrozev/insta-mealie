@@ -1,6 +1,7 @@
 defmodule InstaMealie.PipelineTest do
   use InstaMealie.TestCase
 
+  import ExUnit.CaptureLog
   import Phoenix.LiveViewTest
   import Phoenix.ConnTest
 
@@ -364,6 +365,115 @@ defmodule InstaMealie.PipelineTest do
       assert String.starts_with?(path, "/api/recipes/")
       assert String.ends_with?(path, "/image")
       assert body == %{url: thumbnail_url}
+    end
+  end
+
+  # ── Regression test for the mealie_import ingredient-parse sub-task tag ──
+  #
+  # The `:mealie_import` stage dispatches its blocking work — calling
+  # `Mealie.parse_ingredients/1` — as a distinct `Task.Supervisor.async_nolink/2`
+  # tagged `:mealie_import_parse` (not `:mealie_import`). The tag is an
+  # internal disambiguator so the `{ref, result}` clause for the parse task
+  # doesn't shadow the clause for the real `run_import_inline/1` task.
+  #
+  # Today the generic `{:DOWN, ref, :process, _pid, reason}` handler in
+  # `InstaMealie.Pipeline.Job` pattern-matches the *tag* and reuses it as the
+  # canonical pipeline stage when calling `cancel_stage_timer/2` and
+  # building the `Error.new/2` for `fail_job/2`. That is wrong: when the
+  # parse task crashes, `:mealie_import_parse` is not a real `@type stage`
+  # and its timer was never scheduled under that key (the real timer is
+  # keyed `:mealie_import`). The downstream effects are:
+  #
+  #   * `cancel_stage_timer(:mealie_import_parse, _)` is a no-op — the live
+  #     `:mealie_import` timer survives, queued against a dead GenServer.
+  #   * `fail_job` writes a phantom `stages[:mealie_import_parse] = :failed`
+  #     entry while the canonical `:mealie_import` entry stays stuck at
+  #     `:running`.
+  #   * `error_stage` becomes `:mealie_import_parse`, so the mealie_import
+  #     retry fast-path (`error_stage: :mealie_import`) doesn't match and
+  #     retries fall through to a full reset instead of in-place reimport.
+  #   * `retry_count` is keyed under the wrong atom, breaking the 2-retries-
+  #     per-stage cap on `:mealie_import`.
+  #
+  # This test makes the parse adapter RAISE (not return `{:error, _}`) so
+  # the parse Task crashes, no `{ref, result}` arrives, and the GenServer
+  # receives a `:DOWN` carrying `reason = {%RuntimeError{}, _}`. The bug
+  # surfaces exactly as described above; the assertions below catch each of
+  # the three observable symptoms.
+
+  describe "mealie_import ingredient-parse task crash (tag-disambiguation regression)" do
+    test "ingredient-parse task crash attributes failure to canonical :mealie_import (not :mealie_import_parse)" do
+      Phoenix.PubSub.subscribe(InstaMealie.PubSub, "jobs")
+      test_pid = self()
+
+      # Override the mealie_http_adapter so the parse call RAISES inside the
+      # supbanded task (instead of returning {:error, _}). The exception
+      # propagates up to `Mealie.parse_ingredients/1`, the Task crashes, the
+      # GenServer receives a `:DOWN` (no `{ref, result}` follows), and the
+      # generic :DOWN handler runs.
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(
+        :insta_mealie,
+        :mealie_http_adapter,
+        fn method, path, body ->
+          cond do
+            method == :post and path == "/api/parser/ingredients" ->
+              send(test_pid, {:parser_called, body})
+              raise "simulated parser crash (regression test)"
+
+            true ->
+              prev.(method, path, body)
+          end
+        end
+      )
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          v -> Application.put_env(:insta_mealie, :mealie_http_adapter, v)
+        end
+      end)
+
+      # The crash handler logs at error level; capture it so test output
+      # stays clean and so the test remains green on log-strict configs.
+      capture_log(fn ->
+        assert {:ok, id} =
+                 Pipeline.create_job(%{url: "https://instagram.com/reel/parse-crash"})
+
+        # Subscribe ordering: the failed update is broadcast on the same
+        # "jobs" topic and carries the canonical `error_stage` and stage map
+        # from the transitioned Job. assert_receive on the public broadcast
+        # means we don't need to reach into GenServer internals.
+        assert_receive {:job_updated, %Job{id: ^id, state: :failed} = failed}, 5000
+
+        # ── Symptom (a) ─────────────────────────────────────────────
+        # The crash must be attributed to the canonical :mealie_import
+        # stage so the retry fast-path matches and so retry_count is
+        # keyed under the right atom.
+        assert failed.error_stage == :mealie_import,
+               "expected error_stage :mealie_import, got #{inspect(failed.error_stage)}"
+
+        # ── Symptom (b) ─────────────────────────────────────────────
+        # The crash must NOT introduce a phantom `:mealie_import_parse`
+        # key into `job.stages`. Only the canonical stages appear there.
+        refute Map.has_key?(failed.stages, :mealie_import_parse),
+               "phantom :mealie_import_parse key in stages map: #{inspect(failed.stages)}"
+
+        # ── Symptom (c) ─────────────────────────────────────────────
+        # The canonical :mealie_import stage entry must reflect the
+        # failure — :running would mean the crash path silently skipped
+        # the stage update.
+        assert Map.get(failed.stages, :mealie_import) == :failed,
+               "expected stages[:mealie_import] == :failed, got " <>
+                 inspect(Map.get(failed.stages, :mealie_import))
+
+        # The class follows the task-crash convention (see the generic
+        # :DOWN handler) — useful as a sanity check that we are indeed
+        # in the crash path and not, say, a {:error, %Error{}} path that
+        # would have different semantics.
+        assert failed.error_class == :exception
+      end)
     end
   end
 end

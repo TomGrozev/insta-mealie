@@ -50,6 +50,21 @@ defmodule InstaMealie.TestCase do
     InstaMealie.Pipeline.JobStore.clear()
     InstaMealie.Pipeline.JobAdmission.reset()
 
+    # JobStore.clear() and JobAdmission.reset() scrub the registered
+    # metadata, but the Job GenServers themselves continue to live under
+    # JobSupervisor unless explicitly terminated — including jobs left in
+    # non-terminal states such as :needs_review from a previous test.
+    # Terminate them here to prevent process leaks between tests.
+    InstaMealie.Pipeline.JobSupervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.each(fn
+      {_id, pid, _type, _modules} when is_pid(pid) ->
+        DynamicSupervisor.terminate_child(InstaMealie.Pipeline.JobSupervisor, pid)
+
+      _ ->
+        :ok
+    end)
+
     # Each pipeline stage runs in a supervised task under the Pipeline's
     # TaskSupervisor. Those task processes are not the test process, so
     # Mox must be in global mode for the stubs registered below to be
@@ -170,6 +185,18 @@ defmodule InstaMealie.TestCase do
 
         m == :get and String.starts_with?(p, "/api/organizers/") ->
           {:ok, %{"items" => []}}
+
+        # The create-or-reuse-recipe flow in `InstaMealie.Mealie.import_recipe/1`
+        # does `GET /api/recipes/{slug}` first and only proceeds to `POST /api/recipes`
+        # on a `:not_found` error. The real Mealie returns 404 when the slug is
+        # absent — the production code classifies that via `InstaMealie.HttpClassify`
+        # to `Error{class: :not_found}`. The stub mirrors that directly so the
+        # `maybe_create_recipe/2` gate fires correctly (see bug 1 fix). Tests
+        # that exercise the reuse path override this handler with their own
+        # adapter that returns `{:ok, %{"slug" => ...}}`.
+        m == :get and String.starts_with?(p, "/api/recipes/") and
+            not String.ends_with?(p, "/image") ->
+          {:error, InstaMealie.Error.new(:not_found, "not found")}
 
         m == :post and String.starts_with?(p, "/api/organizers/") ->
           name = body[:name] || body["name"] || "untitled-organizer"

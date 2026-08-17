@@ -34,7 +34,7 @@ defmodule InstaMealie.Pipeline.Job do
         consult_link: boolean(),    # router's recommendation to scrape a link (ADR-0006)
         linked_recipe: %Recipe{} | nil, # recipe scraped from the best candidate URL
         linked_recipe_url: String.t() | nil, # URL the linked_recipe was scraped from
-        stage_task: {%Task{}, atom} | nil  # current async task + the stage it belongs to
+        stage_task: {%Task{}, atom, atom} | nil  # current async task + disambiguating tag + canonical pipeline stage it belongs to
       }
 
   When a task finishes the GenServer receives `{ref, result}` and matches
@@ -79,6 +79,7 @@ defmodule InstaMealie.Pipeline.Job do
     :retry_count,
     :output_language,
     :stage_started_at,
+    :stage_generations,
     :inserted_at,
     :updated_at
   ]
@@ -123,7 +124,11 @@ defmodule InstaMealie.Pipeline.Job do
        consult_link: false,
        linked_recipe: nil,
        linked_recipe_url: nil,
-       stage_task: nil
+       stage_task: nil,
+       # Per-stage `Process.send_after/3` refs for active timeout timers.
+       # Stored on the GenServer state (NOT the durable Job struct) so they
+       # can be cancelled on completion, failure, timeout, or terminate.
+       stage_timers: %{}
      }}
   end
 
@@ -137,14 +142,32 @@ defmodule InstaMealie.Pipeline.Job do
       consult_link: false,
       linked_recipe: nil,
       linked_recipe_url: nil,
-      stage_task: nil
+      stage_task: nil,
+      # Per-stage `Process.send_after/3` refs for active timeout timers.
+      # Stored on the GenServer state (NOT the durable Job struct) so they
+      # can be cancelled on completion, failure, timeout, or terminate.
+      stage_timers: %{}
     }
 
     {:ok, state, {:continue, :start_pipeline}}
   end
 
   @impl true
-  def terminate(_reason, %{job: job}) do
+  def terminate(_reason, %{job: job} = state) do
+    # Cancel any remaining per-stage timeout timers. After this loop nothing
+    # in the scheduler queue targets this GenServer, so a terminate caused
+    # by a crash or external shutdown does not leave dangling timers that
+    # would fire after the process is gone. `Process.cancel_timer/1` returns
+    # `false` for timers that already fired — bind to `_` to discard safely.
+    Enum.each(state.stage_timers || %{}, fn {_stage, ref} ->
+      _ = Process.cancel_timer(ref)
+    end)
+
+    # Kill any in-flight stage task via the existing helper. Idempotent with
+    # the explicit kill in the cancel/timeout handlers — covers every other
+    # terminate path (crash, supervisor shutdown, parent stop).
+    _ = kill_stage_task(state)
+
     # Idempotent: a release after a successful import, a cancel release, and
     # a crash all funnel here without double-freeing the slot.
     JobAdmission.release(job.id)
@@ -286,12 +309,12 @@ defmodule InstaMealie.Pipeline.Job do
         # The resolution step is part of the mealie_import path: the user
         # resolved ingredients and the next step is the Mealie PATCH. Attribute
         # any lookup failure to that stage and let the existing `fail_job/2`
-        # convention carry the job to its failure terminal state.
+        # convention carry the job to its failure terminal state. The job is
+        # now `:failed` so the GenServer stops and deregisters.
         error = %Error{error | stage: :mealie_import}
         failed = fail_job(job, error)
-        JobAdmission.release(failed.id)
         re_read = JobStore.get(failed.id) || failed
-        {:reply, {:error, error}, %{state | job: re_read}}
+        {:stop, :normal, {:error, error}, %{state | job: re_read}}
     end
   end
 
@@ -306,12 +329,13 @@ defmodule InstaMealie.Pipeline.Job do
       state = kill_stage_task(state)
 
       stage = job.stage || :fetch
+      error = Error.new(:cancelled, "job cancelled by user", stage: stage)
 
       job =
         Pipeline.transition(job, [
           {:stage, stage, :failed},
           {:state, :cancelled},
-          {:error, stage, :cancelled, "job cancelled by user"}
+          {:error, error}
         ])
 
       JobAdmission.release(job.id)
@@ -321,12 +345,15 @@ defmodule InstaMealie.Pipeline.Job do
 
   # Re-run the Mealie import on a job that already has a recipe, applying
   # `changes` first. Used by the import-only retry and by post-review resolution.
+  # Both the success and the failure of `run_import_inline/2` produce a
+  # terminal job state (`:succeeded` or `:failed`), so the GenServer stops and
+  # deregisters from the Registry instead of lingering.
   defp reimport(%{job: job} = state, changes) do
     updated = Pipeline.transition(job, changes)
-    result = Pipeline.run_import_inline(updated)
+    result = Pipeline.run_import_inline(updated, job_fetch_dir(state))
     JobAdmission.release(job.id)
     re_read = JobStore.get(job.id) || updated
-    {:reply, result, %{state | job: re_read}}
+    {:stop, :normal, result, %{state | job: re_read}}
   end
 
   # Walk the resolutions map and merge Mealie ids into each entry that has a
@@ -410,18 +437,19 @@ defmodule InstaMealie.Pipeline.Job do
   @impl true
   def handle_info(:run_fetch, %{job: job} = state) do
     job = Pipeline.transition(job, [{:stage, :fetch, :running}])
-    schedule_stage_timeout(:fetch)
+    state = schedule_stage_timeout(:fetch, job, state)
 
     task =
       Task.Supervisor.async_nolink(InstaMealie.Pipeline.TaskSupervisor, fn ->
         InstaMealie.YtDlp.fetch_metadata(job.url, [])
       end)
 
-    {:noreply, %{state | job: job, stage_task: {task, :fetch}}}
+    {:noreply, %{state | job: job, stage_task: {task, :fetch, :fetch}}}
   end
 
-  def handle_info({ref, result}, %{stage_task: {%Task{ref: ref}, :fetch}} = state) do
+  def handle_info({ref, result}, %{stage_task: {%Task{ref: ref}, :fetch, _}} = state) do
     Process.demonitor(ref, [:flush])
+    state = cancel_stage_timer(:fetch, state)
 
     case result do
       {:ok, fetch} ->
@@ -444,14 +472,16 @@ defmodule InstaMealie.Pipeline.Job do
         advance(%{state | job: job, fetch_data: fetch, stage_task: nil})
 
       {:error, %Error{} = error} ->
-        {:noreply, %{state | job: fail_job(state.job, error), stage_task: nil}}
+        # Fetch failure is terminal — the job is now `:failed`, so the
+        # GenServer stops and deregisters instead of holding state forever.
+        {:stop, :normal, %{state | job: fail_job(state.job, error), stage_task: nil}}
     end
   end
 
   @impl true
   def handle_info(:run_llm_format, %{job: job} = state) do
     job = Pipeline.transition(job, [{:stage, :llm_format, :running}])
-    schedule_stage_timeout(:llm_format)
+    state = schedule_stage_timeout(:llm_format, job, state)
 
     case llm_format_input(state) do
       {:ok, caption, comments, links, opts} ->
@@ -464,12 +494,13 @@ defmodule InstaMealie.Pipeline.Job do
          %{
            state
            | job: job,
-             stage_task: {task, :llm_format},
+             stage_task: {task, :llm_format, :llm_format},
              link_candidates: links
          }}
 
       {:error, _reason} ->
-        {:noreply,
+        # No input for LLM format is terminal — fail the job and stop.
+        {:stop, :normal,
          %{
            state
            | job:
@@ -483,14 +514,16 @@ defmodule InstaMealie.Pipeline.Job do
 
   def handle_info(
         {ref, result},
-        %{stage_task: {%Task{ref: ref}, :llm_format}} = state
+        %{stage_task: {%Task{ref: ref}, :llm_format, _}} = state
       ) do
     Process.demonitor(ref, [:flush])
+    state = cancel_stage_timer(:llm_format, state)
 
     case result do
       {:ok, envelope} ->
         if envelope.completeness == :unknown do
-          {:noreply,
+          # Unknown completeness from llm_format is terminal — stop.
+          {:stop, :normal,
            %{
              state
              | job:
@@ -517,7 +550,8 @@ defmodule InstaMealie.Pipeline.Job do
               advance_after_llm_format(%{state | job: job, consult_link: envelope.consult_link})
 
             {:error, field} ->
-              {:noreply,
+              # Recipe validation failure from llm_format is terminal — stop.
+              {:stop, :normal,
                %{
                  state
                  | job:
@@ -534,14 +568,15 @@ defmodule InstaMealie.Pipeline.Job do
         end
 
       {:error, %Error{} = error} ->
-        {:noreply, %{state | job: fail_job(state.job, error), stage_task: nil}}
+        # llm_format task error is terminal — stop.
+        {:stop, :normal, %{state | job: fail_job(state.job, error), stage_task: nil}}
     end
   end
 
   @impl true
   def handle_info(:run_scrape_link, %{job: job} = state) do
     job = Pipeline.transition(job, [{:stage, :scrape_link, :running}])
-    schedule_stage_timeout(:scrape_link)
+    state = schedule_stage_timeout(:scrape_link, job, state)
 
     candidates = Enum.take(state.link_candidates || [], 3)
 
@@ -550,14 +585,15 @@ defmodule InstaMealie.Pipeline.Job do
         scrape_first_success(candidates)
       end)
 
-    {:noreply, %{state | job: job, stage_task: {task, :scrape_link}}}
+    {:noreply, %{state | job: job, stage_task: {task, :scrape_link, :scrape_link}}}
   end
 
   def handle_info(
         {ref, result},
-        %{stage_task: {%Task{ref: ref}, :scrape_link}} = state
+        %{stage_task: {%Task{ref: ref}, :scrape_link, _}} = state
       ) do
     Process.demonitor(ref, [:flush])
+    state = cancel_stage_timer(:scrape_link, state)
 
     case result do
       {:ok, {url, recipe}} ->
@@ -587,7 +623,7 @@ defmodule InstaMealie.Pipeline.Job do
   @impl true
   def handle_info(:run_transcribe, %{job: job, fetch_data: fetch} = state) do
     job = Pipeline.transition(job, [{:stage, :transcribe, :running}])
-    schedule_stage_timeout(:transcribe)
+    state = schedule_stage_timeout(:transcribe, job, state)
 
     task =
       Task.Supervisor.async_nolink(InstaMealie.Pipeline.TaskSupervisor, fn ->
@@ -598,14 +634,15 @@ defmodule InstaMealie.Pipeline.Job do
         end
       end)
 
-    {:noreply, %{state | job: job, stage_task: {task, :transcribe}}}
+    {:noreply, %{state | job: job, stage_task: {task, :transcribe, :transcribe}}}
   end
 
   def handle_info(
         {ref, result},
-        %{stage_task: {%Task{ref: ref}, :transcribe}} = state
+        %{stage_task: {%Task{ref: ref}, :transcribe, _}} = state
       ) do
     Process.demonitor(ref, [:flush])
+    state = cancel_stage_timer(:transcribe, state)
 
     case result do
       {:ok, transcript} ->
@@ -619,7 +656,8 @@ defmodule InstaMealie.Pipeline.Job do
         advance(%{state | job: job, transcript: transcript, stage_task: nil})
 
       {:error, %Error{} = error} ->
-        {:noreply, %{state | job: fail_job(state.job, error), stage_task: nil}}
+        # Transcribe failure is terminal — stop.
+        {:stop, :normal, %{state | job: fail_job(state.job, error), stage_task: nil}}
     end
   end
 
@@ -629,7 +667,7 @@ defmodule InstaMealie.Pipeline.Job do
         %{job: job, fetch_data: fetch, transcript: transcript} = state
       ) do
     job = Pipeline.transition(job, [{:stage, :llm_merge, :running}])
-    schedule_stage_timeout(:llm_merge)
+    state = schedule_stage_timeout(:llm_merge, job, state)
 
     # Resolve the caption based on mode — `:caption_only` jobs now reach
     # llm_merge when the router asks to consult a link (ADR-0006), and those
@@ -645,19 +683,21 @@ defmodule InstaMealie.Pipeline.Job do
         )
       end)
 
-    {:noreply, %{state | job: job, stage_task: {task, :llm_merge}}}
+    {:noreply, %{state | job: job, stage_task: {task, :llm_merge, :llm_merge}}}
   end
 
   def handle_info(
         {ref, result},
-        %{stage_task: {%Task{ref: ref}, :llm_merge}} = state
+        %{stage_task: {%Task{ref: ref}, :llm_merge, _}} = state
       ) do
     Process.demonitor(ref, [:flush])
+    state = cancel_stage_timer(:llm_merge, state)
 
     case result do
       {:ok, envelope} ->
         if envelope.completeness == :unknown do
-          {:noreply,
+          # Unknown completeness from llm_merge is terminal — stop.
+          {:stop, :normal,
            %{
              state
              | job:
@@ -682,7 +722,8 @@ defmodule InstaMealie.Pipeline.Job do
               advance(%{state | job: job, stage_task: nil})
 
             {:error, field} ->
-              {:noreply,
+              # Recipe validation failure from llm_merge is terminal — stop.
+              {:stop, :normal,
                %{
                  state
                  | job:
@@ -699,7 +740,8 @@ defmodule InstaMealie.Pipeline.Job do
         end
 
       {:error, %Error{} = error} ->
-        {:noreply, %{state | job: fail_job(state.job, error), stage_task: nil}}
+        # llm_merge task error is terminal — stop.
+        {:stop, :normal, %{state | job: fail_job(state.job, error), stage_task: nil}}
     end
   end
 
@@ -718,89 +760,131 @@ defmodule InstaMealie.Pipeline.Job do
       job = Pipeline.transition(job, [{:stage, :mealie_import, :running}])
       advance(%{state | job: job})
     else
+      # Blocking work — wrap in a supervised task so cancel and timeout can
+      # interleave (Phase 6). Mark :mealie_import :running so the timeout
+      # handler sees a matching stage if the parser over-runs; the result
+      # handler below adjusts it to :pending/:running once parsing finishes.
+      job = Pipeline.transition(job, [{:stage, :mealie_import, :running}])
+      state = schedule_stage_timeout(:mealie_import, job, state)
+
       # Extract raw strings from Ingredient.note for the Mealie parser API.
       raw_list = Enum.map(recipe.ingredients, fn %Ingredient{note: note} -> note || "" end)
 
-      case InstaMealie.Mealie.parse_ingredients(raw_list) do
-        {:ok, parsed} ->
-          ingredients = Ingredient.apply_parse(recipe.ingredients, parsed)
+      task =
+        Task.Supervisor.async_nolink(InstaMealie.Pipeline.TaskSupervisor, fn ->
+          InstaMealie.Mealie.parse_ingredients(raw_list)
+        end)
 
-          if Enum.any?(ingredients, &(&1.status == :needs_review)) do
-            # Persist the parsed ingredients (with :needs_review status) to the
-            # recipe so the review screen can read them from job.recipe.ingredients.
-            job = Pipeline.transition(job, [{:recipe, %{recipe | ingredients: ingredients}}])
+      {:noreply, %{state | job: job, stage_task: {task, :mealie_import_parse, :mealie_import}}}
+    end
+  end
 
-            # Stop the pipeline here — the user must resolve ingredients via
-            # :resolve_ingredients, which calls run_import_inline synchronously.
-            # We do NOT call advance, so next_stage/1 is not re-entered.
-            job =
-              Pipeline.transition(job, [
-                {:state, :needs_review},
-                {:stage, :mealie_import, :pending}
-              ])
+  def handle_info(
+        {ref, result},
+        %{
+          stage_task: {%Task{ref: ref}, :mealie_import_parse, _},
+          job: %{recipe: recipe}
+        } = state
+      ) do
+    Process.demonitor(ref, [:flush])
+    state = cancel_stage_timer(:mealie_import, state)
 
-            {:noreply, %{state | job: job}}
-          else
-            # All ingredients known: persist the parsed structured data and import.
-            job =
-              Pipeline.transition(job, [
-                {:recipe, %{recipe | ingredients: ingredients}},
-                {:stage, :mealie_import, :running}
-              ])
+    case result do
+      {:ok, parsed} ->
+        ingredients = Ingredient.apply_parse(recipe.ingredients, parsed)
 
-            advance(%{state | job: job})
-          end
+        if Enum.any?(ingredients, &(&1.status == :needs_review)) do
+          # Persist the parsed ingredients (with :needs_review status) to the
+          # recipe so the review screen can read them from job.recipe.ingredients.
+          job = Pipeline.transition(state.job, [{:recipe, %{recipe | ingredients: ingredients}}])
 
-        {:error, %Error{} = error} ->
-          Logger.warning(
-            "[pipeline] job #{job.id} ingredient parse failed (#{error.class}: #{error.summary}), importing with raw ingredients"
-          )
+          # Stop the pipeline here — the user must resolve ingredients via
+          # :resolve_ingredients, which calls run_import_inline synchronously.
+          # We do NOT call advance, so next_stage/1 is not re-entered.
+          job =
+            Pipeline.transition(job, [
+              {:state, :needs_review},
+              {:stage, :mealie_import, :pending}
+            ])
 
-          job = Pipeline.transition(job, [{:stage, :mealie_import, :running}])
-          advance(%{state | job: job})
-      end
+          {:noreply, %{state | job: job, stage_task: nil}}
+        else
+          # All ingredients known: persist the parsed structured data and import.
+          job =
+            Pipeline.transition(state.job, [
+              {:recipe, %{recipe | ingredients: ingredients}},
+              {:stage, :mealie_import, :running}
+            ])
+
+          advance(%{state | job: job, stage_task: nil})
+        end
+
+      {:error, %Error{} = error} ->
+        Logger.warning(
+          "[pipeline] job #{state.job.id} ingredient parse failed (#{error.class}: #{error.summary}), importing with raw ingredients"
+        )
+
+        job = Pipeline.transition(state.job, [{:stage, :mealie_import, :running}])
+        advance(%{state | job: job, stage_task: nil})
     end
   end
 
   @impl true
   def handle_info(:run_import, %{job: job} = state) do
     job = Pipeline.transition(job, [{:stage, :mealie_import, :running}])
+    state = schedule_stage_timeout(:mealie_import, job, state)
+
+    # Extract `fetch_dir` into a local BEFORE building the closure so the
+    # async task captures the value at the moment of dispatch, not the
+    # live GenServer state. The closure runs in a different process; if
+    # we read `state.fetch_data` inside it, we'd be holding the GenServer
+    # state across the GenServer's mailbox — a race against concurrent
+    # transitions. `job_fetch_dir/1` also normalizes `fetch_data: nil`
+    # (caption-only jobs, revived GenServers) to `nil`, so the import
+    # fails closed at `Mealie.upload_image/3`.
+    fetch_dir = job_fetch_dir(state)
 
     task =
       Task.Supervisor.async_nolink(InstaMealie.Pipeline.TaskSupervisor, fn ->
-        Pipeline.run_import_inline(job)
+        Pipeline.run_import_inline(job, fetch_dir)
       end)
 
-    {:noreply, %{state | job: job, stage_task: {task, :mealie_import}}}
+    {:noreply, %{state | job: job, stage_task: {task, :mealie_import, :mealie_import}}}
   end
 
   def handle_info(
         {ref, result},
-        %{stage_task: {%Task{ref: ref}, :mealie_import}} = state
+        %{stage_task: {%Task{ref: ref}, :mealie_import, _}} = state
       ) do
     Process.demonitor(ref, [:flush])
+    state = cancel_stage_timer(:mealie_import, state)
 
     case result do
       {:ok, updated} ->
+        # run_import_inline already transitioned the job to :succeeded; this
+        # is a terminal state, so the GenServer stops and deregisters.
         JobAdmission.release(state.job.id)
-        {:noreply, %{state | job: updated, stage_task: nil}}
+        {:stop, :normal, %{state | job: updated, stage_task: nil}}
 
       {:error, %Error{}} ->
         # run_import_inline already transitioned the job to :failed and wrote
-        # to JobStore; re-read the canonical failed state.
+        # to JobStore; re-read the canonical failed state. Terminal — stop.
         JobAdmission.release(state.job.id)
-        {:noreply, %{state | job: JobStore.get(state.job.id) || state.job, stage_task: nil}}
+        {:stop, :normal, %{state | job: JobStore.get(state.job.id) || state.job, stage_task: nil}}
     end
   end
 
   # scrape_link failure of any kind (timeout, crash, or scrape failure) is
   # SURVIVABLE — it does NOT fail the job. This specific clause must precede
-  # the generic {:stage_timeout, stage} clause below, otherwise Elixir's
+  # the generic {:stage_timeout, stage, gen} clause below, otherwise Elixir's
   # top-to-bottom matching would route scrape_link timeouts through the
   # generic fail-and-stop path.
-  def handle_info({:stage_timeout, :scrape_link}, %{job: job} = state) do
-    if Map.get(job.stages, :scrape_link) == :running do
+  def handle_info({:stage_timeout, :scrape_link, gen}, %{job: job} = state) do
+    current_gen = Map.get(job.stage_generations || %{}, :scrape_link, 0)
+
+    if current_gen == gen and Map.get(job.stages, :scrape_link) == :running do
       Logger.warning("[pipeline] job #{job.id} scrape_link timed out — marking unresolved")
+      state = cancel_stage_timer(:scrape_link, state)
       state = kill_stage_task(state)
       job = Pipeline.transition(job, [{:stage, :scrape_link, :unresolved}])
 
@@ -811,6 +895,13 @@ defmodule InstaMealie.Pipeline.Job do
           linked_recipe_url: nil
       })
     else
+      # Stale timer from a previous attempt (or stage already finished) —
+      # drop silently. Only drop the active ref when the generation in
+      # this message matches the live generation; otherwise the ref in
+      # state belongs to a different (newer) attempt and must survive.
+      state =
+        if current_gen == gen, do: cancel_stage_timer(:scrape_link, state), else: state
+
       {:noreply, state}
     end
   end
@@ -819,12 +910,13 @@ defmodule InstaMealie.Pipeline.Job do
   # clause above. Must precede the generic {:DOWN, ...} clause below.
   def handle_info(
         {:DOWN, ref, :process, _pid, reason},
-        %{stage_task: {%Task{ref: ref}, :scrape_link}} = state
+        %{stage_task: {%Task{ref: ref}, :scrape_link, _}} = state
       ) do
     Logger.warning(
       "[pipeline] job #{state.job.id} scrape_link task crashed: #{inspect(reason)} — marking unresolved"
     )
 
+    state = cancel_stage_timer(:scrape_link, state)
     job = Pipeline.transition(state.job, [{:stage, :scrape_link, :unresolved}])
 
     decide_after_scrape_link(%{
@@ -837,33 +929,56 @@ defmodule InstaMealie.Pipeline.Job do
   end
 
   @impl true
-  def handle_info({:stage_timeout, stage}, %{job: job} = state) do
-    current_stage = Map.get(job.stages, stage)
+  def handle_info({:stage_timeout, stage, gen}, %{job: job} = state) do
+    current_gen = Map.get(job.stage_generations || %{}, stage, 0)
 
-    if current_stage == :running do
-      Logger.error("[pipeline] job #{job.id} timed out at #{stage}")
+    cond do
+      # Stale timer from a previous attempt that failed-fast (or whose user
+      # retried before the timer fired). Drop silently — the per-stage
+      # generation was bumped when the new attempt transitioned to :running,
+      # so this timer no longer belongs to the live stage. We also must NOT
+      # cancel/drop the active ref in `state.stage_timers[stage]` here,
+      # because that ref belongs to the newer generation's live attempt.
+      current_gen != gen ->
+        {:noreply, state}
 
-      # If a task is still running for the timed-out stage, kill it. We then
-      # set stage_task: nil so the pending :DOWN (or any stale result) won't
-      # match a stage_task clause. The GenServer stops right after, so the
-      # mailbox is discarded anyway — demonitor is belt-and-braces.
-      state =
-        case state.stage_task do
-          {%Task{pid: pid, ref: ref}, ^stage} ->
-            Process.exit(pid, :kill)
-            Process.demonitor(ref, [:flush])
-            %{state | stage_task: nil}
+      # Stage already completed for this generation — drop silently. The
+      # result handler already cancelled and removed the ref, but calling
+      # again is a harmless no-op when the ref is gone.
+      Map.get(job.stages, stage) != :running ->
+        state = cancel_stage_timer(stage, state)
+        {:noreply, state}
 
-          _ ->
-            state
-        end
+      true ->
+        Logger.error("[pipeline] job #{job.id} timed out at #{stage}")
 
-      job = fail_job(job, Error.new(:timeout, "#{stage} stage timed out", stage: stage))
-      JobAdmission.release(job.id)
-      {:stop, :normal, %{state | job: job}}
-    else
-      # Stage already completed — ignore stale timeout
-      {:noreply, state}
+        # Drop the timer ref for this stage — its scheduled message has
+        # already fired (this clause IS the handler for that message).
+        state = cancel_stage_timer(stage, state)
+
+        # If a task is still running for the timed-out stage, kill it. We then
+        # set stage_task: nil so the pending :DOWN (or any stale result) won't
+        # match a stage_task clause. The GenServer stops right after, so the
+        # mailbox is discarded anyway — demonitor is belt-and-braces.
+        #
+        # Pin-match against the canonical stage (3rd tuple element), not the
+        # raw tag (2nd). The :mealie_import_parse sub-task carries the
+        # disambiguating tag :mealie_import_parse but still belongs to the
+        # canonical :mealie_import stage — pin-matching against the tag here
+        # would silently skip the explicit kill for that sub-task.
+        state =
+          case state.stage_task do
+            {%Task{pid: pid, ref: ref}, _tag, ^stage} ->
+              Process.exit(pid, :kill)
+              Process.demonitor(ref, [:flush])
+              %{state | stage_task: nil}
+
+            _ ->
+              state
+          end
+
+        job = fail_job(job, Error.new(:timeout, "#{stage} stage timed out", stage: stage))
+        {:stop, :normal, %{state | job: job}}
     end
   end
 
@@ -871,19 +986,39 @@ defmodule InstaMealie.Pipeline.Job do
   # `{ref, result}` message will arrive, only `:DOWN`. (On the success path
   # we `Process.demonitor(ref, [:flush])`, so the `:DOWN` is gone. On the
   # timeout/cancel path we stop the GenServer and the mailbox is dropped.)
+  #
+  # The 3-tuple `stage_task` carries {task, tag, canonical_stage}. The tag
+  # is the disambiguator that lets multiple async sub-steps share one
+  # pipeline stage without colliding in `{ref, result}` clauses; the
+  # canonical_stage is the actual `@type stage` key the stage map, timer
+  # store, retry_count, and telemetry all key off. Use the canonical stage
+  # for every error/timer/telemetry reference here — using the raw tag would
+  # e.g. attribute a `:mealie_import_parse` (parse-sub-task) crash to the
+  # non-canonical `:mealie_import_parse` "stage", write a phantom entry to
+  # `job.stages`, and skip the `:mealie_import`-keyed timer cancel.
   def handle_info(
         {:DOWN, ref, :process, _pid, reason},
-        %{stage_task: {%Task{ref: ref}, stage}} = state
+        %{stage_task: {%Task{ref: ref}, _tag, canonical_stage}} = state
       ) do
-    Logger.error("[pipeline] job #{state.job.id} stage #{stage} task crashed: #{inspect(reason)}")
+    Logger.error(
+      "[pipeline] job #{state.job.id} stage #{canonical_stage} task crashed: #{inspect(reason)}"
+    )
+
+    state = cancel_stage_timer(canonical_stage, state)
 
     job =
       fail_job(
         state.job,
-        Error.new(:exception, "task crashed at #{stage}: #{inspect(reason)}", stage: stage)
+        Error.new(
+          :exception,
+          "task crashed at #{canonical_stage}: #{inspect(reason)}",
+          stage: canonical_stage
+        )
       )
 
-    {:noreply, %{state | job: job, stage_task: nil}}
+    # Task crash leaves the job in `:failed` — terminal — so the GenServer
+    # stops and deregisters instead of holding state forever.
+    {:stop, :normal, %{state | job: job, stage_task: nil}}
   end
 
   # ---- pipeline routing ----
@@ -891,7 +1026,16 @@ defmodule InstaMealie.Pipeline.Job do
   defp advance(%{job: job} = state) do
     case next_stage(job) do
       :idle ->
-        {:noreply, state}
+        # When the FSM reports nothing more to do, only stop the GenServer if
+        # the job has actually reached a terminal state. Non-terminal idle
+        # states (e.g. `:needs_review`, mid-flight `:created`/`:caption_pasting`)
+        # must remain alive so subsequent commands or ingredient resolutions
+        # can still be processed.
+        if job.state in [:succeeded, :failed, :cancelled] do
+          {:stop, :normal, state}
+        else
+          {:noreply, state}
+        end
 
       msg ->
         send(self(), msg)
@@ -906,7 +1050,7 @@ defmodule InstaMealie.Pipeline.Job do
   defp next_stage(job) do
     cond do
       # Terminal states — pipeline is done.
-      job.state in [:succeeded, :failed] ->
+      job.state in [:succeeded, :failed, :cancelled] ->
         :idle
 
       # Fetch is running → run it.
@@ -1035,7 +1179,9 @@ defmodule InstaMealie.Pipeline.Job do
             advance(%{state | job: job})
 
           true ->
-            {:noreply,
+            # Incomplete caption in `:caption_only` mode is terminal — no audio
+            # path exists to recover. The job is now `:failed`, so stop.
+            {:stop, :normal,
              %{
                state
                | job:
@@ -1125,11 +1271,31 @@ defmodule InstaMealie.Pipeline.Job do
   # failing the job.
   defp kill_stage_task(%{stage_task: nil} = state), do: state
 
-  defp kill_stage_task(%{stage_task: {%Task{pid: pid, ref: ref}, _stage}} = state) do
+  defp kill_stage_task(%{stage_task: {%Task{pid: pid, ref: ref}, _tag, _stage}} = state) do
     Process.exit(pid, :kill)
     Process.demonitor(ref, [:flush])
     %{state | stage_task: nil}
   end
+
+  # Pull `:fetch_dir` out of the GenServer's transient `state.fetch_data`
+  # stash (the per-job temp dir `InstaMealie.YtDlp` created for the
+  # reel fetch). It's only present in this state map, not on the
+  # durable `Job` struct — so the same GenServer state is the only
+  # reliable source. Returns `nil` when:
+  #   * the fetch stage never ran (`:caption_only` jobs that go
+  #     straight to `:llm_format`)
+  #   * the GenServer was revived from an ETS snapshot, where
+  #     `init({:revive, job})` always sets `fetch_data: nil` so the
+  #     snapshot stays self-contained
+  #   * the fetch stage ran but the result had no `:fetch_dir` key
+  #     (defensive — production code always sets it)
+  # `nil` is the fail-closed signal to `Mealie.upload_image/3`: reject
+  # any non-URL `recipe.image` (see the security gate there).
+  defp job_fetch_dir(%{fetch_data: fetch_data}) when is_map(fetch_data) do
+    Map.get(fetch_data, :fetch_dir)
+  end
+
+  defp job_fetch_dir(_), do: nil
 
   defp filter_op_comments(op, comments) when is_binary(op) do
     Enum.filter(comments || [], fn comment ->
@@ -1154,15 +1320,73 @@ defmodule InstaMealie.Pipeline.Job do
     Map.get(timeouts, stage)
   end
 
-  # Schedules a `{:stage_timeout, stage}` message after the configured
-  # deadline. Skipped when the stage has no configured timeout or the
-  # timeout is non-positive.
-  defp schedule_stage_timeout(stage) do
+  # Schedules a `{:stage_timeout, stage, gen}` message after the configured
+  # deadline. The current per-stage generation is included so the timeout
+  # handler can ignore stale timers left over from a previous attempt that
+  # failed-fast (or whose user retried before the timer fired). Skipped when
+  # the stage has no configured timeout or the timeout is non-positive.
+  #
+  # Takes the current state, cancels any previously scheduled timer for this
+  # stage (cancel-and-replace semantics — the ref is no longer discarded),
+  # stores the new ref in `state.stage_timers`, and returns the updated state.
+  defp schedule_stage_timeout(stage, job, state) do
     timeout = stage_timeout(stage)
+    gen = Map.get(job.stage_generations || %{}, stage, 0)
 
     if timeout && timeout > 0 do
-      Process.send_after(self(), {:stage_timeout, stage}, timeout)
+      # Replace any previous timer for this stage. The previous ref is
+      # cancelled so it cannot fire after a retry transitions the stage to
+      # a new generation; the matching handle_info clause for
+      # `{:stage_timeout, stage, gen}` would still drop it via the
+      # generation check, but cancelling avoids the queue round-trip and
+      # keeps state consistent.
+      state = cancel_stage_timer(stage, state)
+      ref = Process.send_after(self(), {:stage_timeout, stage, gen}, timeout)
+      put_stage_timer(state, stage, ref)
+    else
+      state
     end
+  end
+
+  # Cancel the active timer for `stage` and remove its ref from state. Safe
+  # when no timer is active (no-op) and when the timer has already fired
+  # (`Process.cancel_timer/1` returns `false`, which we discard).
+  defp cancel_stage_timer(stage, state) do
+    case get_stage_timer(state, stage) do
+      nil ->
+        state
+
+      ref ->
+        _ = Process.cancel_timer(ref)
+        drop_stage_timer(state, stage)
+    end
+  end
+
+  defp get_stage_timer(state, stage) do
+    case Map.get(state, :stage_timers) do
+      timers when is_map(timers) -> Map.get(timers, stage)
+      _ -> nil
+    end
+  end
+
+  defp put_stage_timer(state, stage, ref) do
+    timers =
+      case Map.get(state, :stage_timers) do
+        t when is_map(t) -> t
+        _ -> %{}
+      end
+
+    %{state | stage_timers: Map.put(timers, stage, ref)}
+  end
+
+  defp drop_stage_timer(state, stage) do
+    timers =
+      case Map.get(state, :stage_timers) do
+        t when is_map(t) -> t
+        _ -> %{}
+      end
+
+    %{state | stage_timers: Map.delete(timers, stage)}
   end
 
   # ---- provenance stamping (ADR-0006) ----
@@ -1250,10 +1474,23 @@ defmodule InstaMealie.Pipeline.Job do
   defp fail_job(job, %Error{} = error) do
     error = if error.stage, do: error, else: %{error | stage: job.stage}
 
-    Pipeline.transition(job, [
-      {:stage, error.stage, :failed},
-      {:state, :failed},
-      {:error, error}
-    ])
+    failed =
+      Pipeline.transition(job, [
+        {:stage, error.stage, :failed},
+        {:state, :failed},
+        {:error, error}
+      ])
+
+    # Eager release of the concurrency slot — defense in depth, not the only
+    # release. Every caller of `fail_job/2` stops the GenServer immediately
+    # afterward with `{:stop, :normal, ...}`, which independently runs
+    # `terminate/2` and releases the same slot again. That second release is
+    # safe ONLY because `JobAdmission.handle_cast({:release, job_id}, state)`
+    # guards on membership in the active set and no-ops when the id is already
+    # gone. Do not remove that guard treating it as dead code: this call site
+    # (and any other double-release path) depends on it for correct slot
+    # accounting.
+    JobAdmission.release(failed.id)
+    failed
   end
 end

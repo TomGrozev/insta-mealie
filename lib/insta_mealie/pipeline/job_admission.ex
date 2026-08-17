@@ -117,22 +117,31 @@ defmodule InstaMealie.Pipeline.JobAdmission do
 
   @impl true
   def handle_cast({:release, job_id}, state) do
-    state = %{state | active: MapSet.delete(state.active, job_id)}
-    state = admit_next(state)
-    {:noreply, state}
+    if MapSet.member?(state.active, job_id) do
+      state = %{state | active: MapSet.delete(state.active, job_id)}
+      admit_next(state)
+    else
+      state
+    end
+    |> then(&{:noreply, &1})
   end
 
   # -- private --
 
-  # Pop the next queued job (if any), add it to the active set, and
-  # start its GenServer. Called from the release handler so a freed
-  # slot immediately unblocks the FIFO head.
+  # Pop the next queued job (if any) and try to start its GenServer.
+  # Only commit the job to the active set after start succeeds — on
+  # failure, drop the job and try the next one in the queue. Called
+  # from the release handler so a freed slot immediately unblocks the
+  # FIFO head.
   defp admit_next(state) do
     case :queue.out(state.queue) do
       {{:value, job_id}, new_queue} ->
-        state = %{state | queue: new_queue, active: MapSet.put(state.active, job_id)}
-        start_queued_job(job_id)
-        state
+        state = %{state | queue: new_queue}
+
+        case start_queued_job(job_id) do
+          :ok -> %{state | active: MapSet.put(state.active, job_id)}
+          :error -> admit_next(state)
+        end
 
       {:empty, _} ->
         state
@@ -141,11 +150,15 @@ defmodule InstaMealie.Pipeline.JobAdmission do
 
   # The Job struct lives in JobStore. Look it up and start its
   # GenServer. If the row has gone (TTL sweep, manual delete, etc.)
-  # we log and move on — the slot was reserved and the row is gone.
+  # we log and return `:error` so the caller can skip this job and try
+  # the next one. Returns `:ok` when the GenServer is running (or
+  # already running — `{:already_started, _}` counts as success), and
+  # `:error` on missing JobStore row or DynamicSupervisor failure.
   defp start_queued_job(job_id) do
     case JobStore.get(job_id) do
       nil ->
         Logger.warning("[admission] queued job #{job_id} not found in store; skipping start")
+        :error
 
       job ->
         spec = Supervisor.child_spec({Job, job}, restart: :temporary)
@@ -162,7 +175,7 @@ defmodule InstaMealie.Pipeline.JobAdmission do
 
           {:error, _reason} = err ->
             Logger.error("[admission] failed to start queued job #{job_id}: #{inspect(err)}")
-            err
+            :error
         end
     end
   end

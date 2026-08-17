@@ -77,6 +77,7 @@ defmodule InstaMealie.Pipeline do
         retry_count: %{},
         output_language: output_language(),
         stage_started_at: nil,
+        stage_generations: %{},
         inserted_at: now,
         updated_at: now
       }
@@ -194,6 +195,11 @@ defmodule InstaMealie.Pipeline do
         {:error, :retry_cap_exceeded}
       end
     else
+      # The ETS row was TTL-evicted while the GenServer was still alive (or
+      # the lookup race-lost a concurrent sweep); the guarded `with` clause
+      # neither matches the tuple error nor a `nil` job, so we route both to
+      # `:not_found` here.
+      nil -> {:error, :not_found}
       {:error, _} = error -> error
     end
   end
@@ -302,34 +308,78 @@ defmodule InstaMealie.Pipeline do
   @doc """
   Ensure a job GenServer is alive for the given `job_id`.
 
-  If the process is already registered, returns `{:ok, pid}`. If the process
-  is gone but the ETS row exists and the job is non-terminal, restarts the
-  GenServer from the snapshot (revive path) and returns `{:ok, pid}`.
-  Otherwise returns `{:error, :not_found}` (no row) or `{:error, :terminal}`
-  (row exists but the job is already in a final state).
+  If a live process is registered and the job is non-terminal, returns
+  `{:ok, pid}`. Otherwise (no process registered, the registered process is
+  dead, or the job is terminal) restarts the GenServer from the durable ETS
+  snapshot (revive path) and returns `{:ok, pid}`. Terminal jobs are revived
+  too — the retry / transcribe-anyway / paste-caption recovery paths require
+  a live GenServer to re-run the pipeline from the row.
+
+  Returns `{:error, :not_found}` (no row), `{:error, :queued}` (the job is
+  waiting for an admission slot — not yet admitted, so reviving it would bypass
+  `max_concurrency`), or `{:error, :revive_failed}` (the prior process's
+  registry slot could not be reclaimed).
   """
   def ensure_job_process(job_id) do
     case Registry.lookup(__MODULE__.Registry, job_id) do
       [{pid, _}] ->
-        {:ok, pid}
+        case JobStore.get(job_id) do
+          %{state: state} when state in [:succeeded, :failed, :cancelled] ->
+            # Terminal job: the registered process is a stale / terminating
+            # instance left over from the stop-on-terminal behaviour. Never
+            # route a command to it — revive a fresh GenServer from the
+            # durable snapshot instead.
+            revive_from_store(job_id)
+
+          %{state: :queued} ->
+            # Queued jobs have not been admitted by JobAdmission and have no
+            # recipe populated; reviving would bypass `max_concurrency` and
+            # crash callers that assume `job.recipe` is present. Refuse so the
+            # caller can wait for admission.
+            {:error, :queued}
+
+          _ ->
+            if Process.alive?(pid), do: {:ok, pid}, else: revive_from_store(job_id)
+        end
 
       [] ->
-        case JobStore.get(job_id) do
-          nil ->
-            {:error, :not_found}
+        revive_from_store(job_id)
+    end
+  end
 
-          %{state: state} when state in [:succeeded, :failed, :cancelled] ->
-            {:error, :terminal}
+  # Revive a GenServer from the durable ETS snapshot. Terminal jobs reach here
+  # deliberately (their prior process has stopped); non-terminal jobs reach here
+  # only when their registered process is missing or dead. The `:queued` state
+  # is never revived — admission owns that transition.
+  defp revive_from_store(job_id, attempts \\ 0)
 
-          job ->
-            # Restart from snapshot — revive path.
-            case DynamicSupervisor.start_child(
-                   JobSupervisor,
-                   {Job, {:revive, job}}
-                 ) do
-              {:ok, pid} -> {:ok, pid}
-              {:error, reason} -> {:error, reason}
-            end
+  defp revive_from_store(_job_id, attempts) when attempts >= 100 do
+    {:error, :revive_failed}
+  end
+
+  defp revive_from_store(job_id, attempts) do
+    case JobStore.get(job_id) do
+      nil ->
+        {:error, :not_found}
+
+      %{state: :queued} ->
+        {:error, :queued}
+
+      job ->
+        spec = Supervisor.child_spec({Job, {:revive, job}}, restart: :temporary)
+
+        case DynamicSupervisor.start_child(JobSupervisor, spec) do
+          {:ok, pid} ->
+            {:ok, pid}
+
+          {:error, {:already_registered, _}} ->
+            # The previous owner (a terminal job's stopping GenServer) is still
+            # releasing its registry slot. Back off briefly and retry.
+            Process.sleep(10)
+            revive_from_store(job_id, attempts + 1)
+
+          {:error, reason} ->
+            {:error, reason}
         end
     end
   end
@@ -337,7 +387,7 @@ defmodule InstaMealie.Pipeline do
   # Look up the job's GenServer pid in the registry and forward the command.
   # `ensure_job_process/1` handles the revive-from-store case, so by the time
   # we get a pid the GenServer is definitely running. A failed lookup surfaces
-  # as `{:error, :not_found}` (no row) or `{:error, :terminal}` (terminal).
+  # as `{:error, :not_found}` (no row) or `{:error, :queued}` (admission-pending).
   defp call_job(job_id, message) do
     case ensure_job_process(job_id) do
       {:ok, pid} -> GenServer.call(pid, message, 60_000)
@@ -455,6 +505,20 @@ defmodule InstaMealie.Pipeline do
       (job.stage_started_at || %{})
       |> Map.put(stage, System.monotonic_time())
 
+    # Bump the per-stage generation only on an actual idle/queued -> running
+    # transition so a stale `{:stage_timeout, stage, gen}` message (left over
+    # from a previous attempt that failed-fast) cannot kill a legitimate retry
+    # of the same stage. See `schedule_stage_timeout/2` and the generic timeout
+    # handler for the matching check. Reapplying :running while the stage is
+    # already running must NOT bump, or the generation invariant (one bump per
+    # real stage start) is broken.
+    generations =
+      if old != :running do
+        Map.update(job.stage_generations || %{}, stage, 1, fn gen -> gen + 1 end)
+      else
+        job.stage_generations
+      end
+
     :telemetry.execute(
       [:insta_mealie, :pipeline, :stage, :start],
       %{system_time: System.system_time()},
@@ -465,7 +529,8 @@ defmodule InstaMealie.Pipeline do
       job
       | stage: stage,
         stages: Map.put(job.stages, stage, :running),
-        stage_started_at: started_at
+        stage_started_at: started_at,
+        stage_generations: generations
     }
   end
 
@@ -556,6 +621,13 @@ defmodule InstaMealie.Pipeline do
   result to ETS and broadcasting the update. Returns `{:ok, updated_job}` on
   success or `{:error, %Error{}}` on failure.
 
+  `fetch_dir` is the per-job temp directory `InstaMealie.YtDlp` created
+  for the reel fetch; it constrains which local-file paths are
+  acceptable for `Recipe.image` (see `Mealie.upload_image/3`). It must
+  be extracted from `Job`'s GenServer state (`state.fetch_data[:fetch_dir]`)
+  BEFORE building the async task closure — otherwise the async task
+  runs with the live GenServer's state map, not a snapshot.
+
   This is the canonical import entrypoint. The GenServer (via
   `InstaMealie.Pipeline.Job.run_import/1`) delegates here after setting the
   `:mealie_import` stage to `:running`. The post-review path
@@ -563,11 +635,11 @@ defmodule InstaMealie.Pipeline do
   pre-setting the stage. Callers MUST set the stage to `:running` before
   calling; this function sets `:done` on success or `:failed` on error.
   """
-  @spec run_import_inline(Job.t()) :: {:ok, Job.t()} | {:error, Error.t()}
-  def run_import_inline(job) do
+  @spec run_import_inline(Job.t(), String.t() | nil) :: {:ok, Job.t()} | {:error, Error.t()}
+  def run_import_inline(job, fetch_dir) do
     recipe = job.recipe || Recipe.empty()
 
-    case InstaMealie.Mealie.import_recipe(recipe) do
+    case InstaMealie.Mealie.import_recipe(recipe, fetch_dir) do
       {:ok, slug, deep_link} ->
         updated =
           transition(job, [
