@@ -32,9 +32,18 @@ defmodule InstaMealie.HttpClassifyTest do
     end
   end
 
+  describe "classify/1 — not_found" do
+    test "404 maps to :not_found (distinct from the generic :api_error class)" do
+      # Mealie's create-or-reuse-recipe flow needs to distinguish "recipe
+      # missing" from "transport / auth / 5xx" so a get-then-create dance
+      # only fires for genuine 404s. See `InstaMealie.Mealie.maybe_create_recipe/2`.
+      assert HttpClassify.classify(404) == Error.new(:not_found, "not found")
+    end
+  end
+
   describe "classify/1 — generic 4xx/5xx" do
-    test "404 (other 4xx) maps to :api_error with the status in the summary" do
-      assert HttpClassify.classify(404) == Error.new(:api_error, "client error 404")
+    test "other 4xx (400) maps to :api_error with the status in the summary" do
+      assert HttpClassify.classify(400) == Error.new(:api_error, "client error 400")
     end
 
     test "500 maps to :network with the status in the summary" do

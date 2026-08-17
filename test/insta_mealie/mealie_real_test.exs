@@ -134,6 +134,22 @@ defmodule InstaMealie.Mealie.RealTest do
   setup do
     Mox.set_mox_global()
     JobStore.clear()
+    InstaMealie.Pipeline.JobAdmission.reset()
+
+    # JobStore.clear() and JobAdmission.reset() scrub the registered
+    # metadata, but the Job GenServers themselves continue to live under
+    # JobSupervisor unless explicitly terminated — including jobs left in
+    # non-terminal states such as :needs_review from a previous test.
+    # Terminate them here to prevent process leaks between tests.
+    InstaMealie.Pipeline.JobSupervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.each(fn
+      {_id, pid, _type, _modules} when is_pid(pid) ->
+        DynamicSupervisor.terminate_child(InstaMealie.Pipeline.JobSupervisor, pid)
+
+      _ ->
+        :ok
+    end)
 
     {:ok, sock} = :gen_tcp.listen(0, [])
     {:ok, port} = :inet.port(sock)
@@ -554,7 +570,9 @@ defmodule InstaMealie.Mealie.RealTest do
         case {method, path} do
           {:get, "/api/recipes/test"} ->
             # No recipe with this slug yet — slug comes from the recipe name.
-            {:error, Error.new(:api_error, "not found")}
+            # The stub mimics what the real HttpClassify produces from a 404
+            # response so the create branch runs.
+            {:error, Error.new(:not_found, "not found")}
 
           {:post, "/api/recipes"} ->
             # POST /api/recipes returns a map with a slug — the adapter
@@ -575,7 +593,7 @@ defmodule InstaMealie.Mealie.RealTest do
 
       recipe = Recipe.from_map(%{"name" => "Test"})
 
-      assert {:ok, "test", deep_link} = Mealie.import_recipe(recipe)
+      assert {:ok, "test", deep_link} = Mealie.import_recipe(recipe, nil)
       assert deep_link =~ "/g/home/r/test?edit=true"
 
       # GET /api/recipes/test with no body — slug is derived from the recipe name.
@@ -618,7 +636,7 @@ defmodule InstaMealie.Mealie.RealTest do
 
       recipe = Recipe.from_map(%{"name" => "Draft Slug"})
 
-      assert {:ok, "draft-slug", deep_link} = Mealie.import_recipe(recipe)
+      assert {:ok, "draft-slug", deep_link} = Mealie.import_recipe(recipe, nil)
 
       assert deep_link =~ "/g/home/r/draft-slug?edit=true"
 
@@ -632,6 +650,157 @@ defmodule InstaMealie.Mealie.RealTest do
 
       # No create, no update under another path
       refute_receive {:adapter_called, :post, _, _}, 50
+    end
+  end
+
+  describe "import_recipe/1 — get_recipe fails with a NON-:not_found error" do
+    test "non-404 get_recipe failure propagates without attempting create_recipe (regression: bug 1)" do
+      # Before the fix, `maybe_create_recipe/2` treated ANY get_recipe error as
+      # "doesn't exist" and tried `create_recipe/1` — for a recipe whose name
+      # genuinely exists server-side, Mealie's POST /api/recipes would silently
+      # suffix the name with " (1)", " (2)", ... and return a *different* slug
+      # that matches no `with` pattern, raising WithClauseError and leaving an
+      # orphan duplicate in Mealie. After the fix, only a :not_found (HTTP 404)
+      # triggers create; any other error class propagates verbatim.
+      test_pid = self()
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
+        send(test_pid, {:adapter_called, method, path, body})
+
+        case {method, path} do
+          {:get, "/api/recipes/granola"} ->
+            # Simulates a transient 5xx / network blip — NOT a 404. The bug
+            # is precisely that this kind of error was mis-classified as
+            # "recipe doesn't exist" and triggered a duplicate POST.
+            {:error, Error.new(:network, "server error 500")}
+
+          {:post, "/api/recipes"} ->
+            # If the bug regresses, this branch will be hit. Refute below.
+            {:ok, %{"slug" => "granola"}}
+
+          {:patch, "/api/recipes/granola"} ->
+            # The recipe (per the pre-fix code) WOULD be created and then
+            # patched. If we reach this point, the test is failing for the
+            # right reason: the bug let create_recipe run on a non-404 GET.
+            {:ok, %{}}
+        end
+      end)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          _ -> Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+        end
+      end)
+
+      recipe = Recipe.from_map(%{"name" => "Granola"})
+
+      assert {:error, %Error{class: :network} = error} = Mealie.import_recipe(recipe, nil)
+      assert error.summary =~ "server error 500"
+
+      # get_recipe was attempted.
+      assert_receive {:adapter_called, :get, "/api/recipes/granola", nil}
+
+      # create_recipe was NEVER attempted — the error short-circuits before
+      # it. This is the regression assertion: any failure here means the
+      # pre-fix mis-classification of non-404 errors as "not found" came back.
+      refute_receive {:adapter_called, :post, "/api/recipes", _}, 50
+    end
+  end
+
+  describe "import_recipe/1 — reused slug with a later-stage failure" do
+    test "PATCH failure on a reused slug does NOT delete the pre-existing recipe (regression: bug 2)" do
+      # Before the fix, `import_recipe/1`'s `else` branch unconditionally called
+      # `delete_recipe(slug)` on any failure — even though `maybe_create_recipe/2`
+      # might have only *reused* a pre-existing recipe. So a transient PATCH
+      # failure would silently destroy a recipe that predated this call. After
+      # the fix, `maybe_create_recipe/2` distinguishes :created from :reused,
+      # and the rollback only fires when this call created the recipe.
+      test_pid = self()
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
+        send(test_pid, {:adapter_called, method, path, body})
+
+        case {method, path} do
+          {:get, "/api/recipes/pre-existing"} ->
+            # Recipe with this slug already exists server-side — the reuse branch.
+            {:ok, %{"slug" => "pre-existing"}}
+
+          {:patch, "/api/recipes/pre-existing"} ->
+            # PATCH fails (transient 5xx). Pre-fix this would trigger a DELETE.
+            {:error, Error.new(:network, "server error 500")}
+
+          {:delete, "/api/recipes/pre-existing"} ->
+            # If the bug regresses, this branch will be hit. Refute below.
+            {:ok, %{}}
+        end
+      end)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          _ -> Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+        end
+      end)
+
+      recipe = Recipe.from_map(%{"name" => "Pre Existing"})
+
+      assert {:error, %Error{class: :network} = error} = Mealie.import_recipe(recipe, nil)
+      assert error.summary =~ "server error 500"
+
+      # get_recipe was attempted (reuse path).
+      assert_receive {:adapter_called, :get, "/api/recipes/pre-existing", nil}
+
+      # patch_recipe was attempted and failed.
+      assert_receive {:adapter_called, :patch, "/api/recipes/pre-existing", _patch_body}
+
+      # DELETE was NEVER attempted — the pre-existing recipe is left alone.
+      refute_receive {:adapter_called, :delete, "/api/recipes/pre-existing", _}, 50
+    end
+  end
+
+  describe "import_recipe/1 — create_recipe fails (nothing to roll back)" do
+    test "create_recipe failure does not attempt a DELETE (nothing was created yet)" do
+      # Sanity check on the touched-by-this-bug path: when get_recipe returns
+      # :not_found AND create_recipe fails, the recipe was never created, so
+      # the rollback must not run. Pre-fix the rollback did run on every
+      # failure regardless; post-fix it only runs after a successful create.
+      test_pid = self()
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(:insta_mealie, :mealie_http_adapter, fn method, path, body ->
+        send(test_pid, {:adapter_called, method, path, body})
+
+        case {method, path} do
+          {:get, "/api/recipes/failing-create"} ->
+            {:error, Error.new(:not_found, "not found")}
+
+          {:post, "/api/recipes"} ->
+            {:error, Error.new(:api_error, "create failed")}
+
+          {:delete, "/api/recipes/failing-create"} ->
+            # If the bug regresses, this branch will be hit. Refute below.
+            {:ok, %{}}
+        end
+      end)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:insta_mealie, :mealie_http_adapter)
+          _ -> Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+        end
+      end)
+
+      recipe = Recipe.from_map(%{"name" => "Failing Create"})
+
+      assert {:error, %Error{class: :api_error}} = Mealie.import_recipe(recipe, nil)
+
+      assert_receive {:adapter_called, :get, "/api/recipes/failing-create", nil}
+      assert_receive {:adapter_called, :post, "/api/recipes", _create_body}
+
+      refute_receive {:adapter_called, :delete, _, _}, 50
     end
   end
 

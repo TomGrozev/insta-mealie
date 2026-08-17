@@ -163,36 +163,69 @@ defmodule InstaMealie.Mealie do
   Import a recipe. Reuses an existing draft with the same slug if one exists,
   otherwise creates it.
 
+  `fetch_dir` constrains which local-file paths are acceptable for
+  `Recipe.image` (see `upload_image/3`). It is the per-job temp directory
+  that `InstaMealie.YtDlp` created for the reel fetch — the only place a
+  legitimate local thumbnail ever lives. Pass `nil` for caption-only
+  jobs and for jobs whose GenServer was revived from an ETS snapshot;
+  in both cases the gate fails closed and any non-URL `recipe.image`
+  is rejected with a logged warning.
+
   On success returns `{:ok, slug, deep_link}`. On failure returns
   `{:error, %Error{}}`.
   """
-  @spec import_recipe(Recipe.t()) ::
+  @spec import_recipe(Recipe.t(), String.t() | nil) ::
           {:ok, String.t(), String.t()}
           | {:error, Error.t()}
-  def import_recipe(%Recipe{} = recipe) do
+  def import_recipe(%Recipe{} = recipe, fetch_dir) do
     name = recipe.name || "Untitled recipe"
     slug = slugify(name)
 
-    with :ok <- maybe_create_recipe(slug, name),
-         {:ok, ^slug} <- patch_recipe(slug, recipe),
-         :ok <- upload_image(slug, recipe.image) do
-      {:ok, slug, deep_link(slug)}
-    else
-      {:error, %Error{} = error} ->
-        delete_recipe(slug)
+    # `maybe_create_recipe/2` distinguishes whether THIS call created the
+    # recipe (`:created`) or only reused a pre-existing one (`:reused`) — the
+    # rollback below must only fire when we own the slug we are about to
+    # touch, never when the slug pre-dates this call. See
+    # `maybe_create_recipe/2`'s docstring and the regression tests in
+    # `test/insta_mealie/mealie_real_test.exs`.
+    case maybe_create_recipe(slug, name) do
+      {:ok, create_status} ->
+        with {:ok, ^slug} <- patch_recipe(slug, recipe),
+             :ok <- upload_image(slug, recipe.image, fetch_dir) do
+          {:ok, slug, deep_link(slug)}
+        else
+          {:error, %Error{} = error} ->
+            if create_status == :created, do: delete_recipe(slug)
+            {:error, error}
+        end
 
+      {:error, %Error{} = error} ->
+        # No recipe was created or reused — propagate the failure.
         {:error, error}
     end
   end
 
+  # Ensure a recipe exists at `slug`, either by creating a new draft or by
+  # confirming a pre-existing one. Only a HTTP 404 from the GET — i.e.
+  # `Error{class: :not_found}` — is treated as "doesn't exist"; any other
+  # failure (network, auth, rate-limited, generic 4xx, 5xx) propagates
+  # verbatim. Without this gate, a transient 5xx on the GET would otherwise
+  # be mis-classified as "recipe missing", prompting `create_recipe/1` which
+  # against a name that genuinely exists server-side silently suffixes the
+  # name with " (1)", " (2)", ... and returns a *different* slug — matching
+  # no `with` pattern and raising `WithClauseError` while leaving a duplicate
+  # orphan recipe in Mealie.
+  #
+  # Returns `{:ok, :created}` when this call created the recipe,
+  # `{:ok, :reused}` when an existing recipe was found, or
+  # `{:error, %Error{}}` on any failure.
   defp maybe_create_recipe(slug, name) do
-    with {:error, %Error{}} <- get_recipe(slug),
+    with {:error, %Error{class: :not_found}} <- get_recipe(slug),
          {:ok, %RecipeRef{slug: ^slug}} <- create_recipe(name) do
-      :ok
+      {:ok, :created}
     else
       {:ok, %RecipeRef{slug: ^slug}} ->
         Logger.info("[mealie] import_recipe found existing recipe #{slug}, reusing")
-        :ok
+        {:ok, :reused}
 
       {:error, %Error{} = error} ->
         {:error, error}
@@ -420,7 +453,47 @@ defmodule InstaMealie.Mealie do
 
   # ── Image upload ───────────────────────────────────────────────────
 
-  defp upload_image(slug, image) when is_binary(slug) do
+  # Local-file image upload is gated by `fetch_dir` (the per-job temp
+  # directory `InstaMealie.YtDlp` created for this reel fetch). The
+  # legitimate thumbnail is the only file the app ever needs to push
+  # from disk to Mealie, and it always lives inside that directory.
+  # Without the gate, an attacker-controlled `recipe.image` value
+  # (LLM-prompt-injected from a reel caption/comments, or scraped from
+  # a third-party recipe page) can coerce the pipeline into streaming
+  # an arbitrary local file — the Instagram session cookie, `.envrc`,
+  # SSH keys, anything the BEAM process can read — to Mealie. The gate
+  # closes that path:
+  #
+  #   * `image: nil`            → `:ok` (no-op, unchanged)
+  #   * `image: "http(s)://..."` → `upload_image_url/2` (unchanged; the
+  #                                URL branch is independent of
+  #                                fetch_dir — Mealie itself fetches the
+  #                                bytes server-side)
+  #   * `image: "/some/path"`   → `upload_image_file/2` ONLY when
+  #                                `fetch_dir` is a non-nil binary AND
+  #                                `Path.expand(image)` lives inside
+  #                                `Path.expand(fetch_dir)` AND is a
+  #                                regular file. The expanded path
+  #                                (not the raw string) is used so a
+  #                                raw `../` segment cannot escape
+  #                                the prefix check. The file branch
+  #                                receives the EXPANDED path so a
+  #                                relative `..` cannot smuggle bytes
+  #                                outside fetch_dir either.
+  #   * anything else           → log a warning with the rejected path
+  #                                and slug, return `:ok` (silently
+  #                                skip the image, do NOT fail the
+  #                                recipe import — mirrors the
+  #                                existing catch-all's spirit).
+  #
+  # `fetch_dir: nil` covers two production cases: `:caption_only` jobs
+  # never ran a fetch stage, and a GenServer revived from an ETS
+  # snapshot always has `fetch_data: nil` (see `init({:revive, job})`
+  # in `lib/insta_mealie/pipeline/job.ex`). In both, fail closed:
+  # only URLs are accepted. This is an accepted tradeoff — an
+  # already-succeeded-fetch's thumbnail can be silently dropped on a
+  # revive+retry rather than risk an unvalidated path.
+  defp upload_image(slug, image, fetch_dir) when is_binary(slug) do
     cond do
       is_nil(image) ->
         :ok
@@ -428,12 +501,28 @@ defmodule InstaMealie.Mealie do
       String.starts_with?(image, "http://") or String.starts_with?(image, "https://") ->
         upload_image_url(slug, image)
 
-      File.exists?(image) ->
-        upload_image_file(slug, image)
+      is_binary(fetch_dir) and inside_fetch_dir?(image, fetch_dir) ->
+        upload_image_file(slug, Path.expand(image))
 
       true ->
+        Logger.warning(
+          "[mealie] rejecting recipe image outside fetch_dir for #{slug}: path=#{inspect(image)} fetch_dir=#{inspect(fetch_dir)}"
+        )
+
         :ok
     end
+  end
+
+  # The prefix check uses the EXPANDED path on both sides so a raw
+  # `../` segment cannot smuggle outside `fetch_dir`. The trailing `/`
+  # on the fetch_dir prefix prevents `/tmp/fetch_dir_evil` from
+  # matching `/tmp/fetch_dir` (substring without separator).
+  defp inside_fetch_dir?(image, fetch_dir) do
+    expanded_image = Path.expand(image)
+    expanded_fetch_dir = Path.expand(fetch_dir)
+    prefix = expanded_fetch_dir <> "/"
+
+    String.starts_with?(expanded_image, prefix) and File.regular?(expanded_image)
   end
 
   defp upload_image_url(slug, url) do

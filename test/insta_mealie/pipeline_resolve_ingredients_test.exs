@@ -183,6 +183,18 @@ defmodule InstaMealie.PipelineResolveIngredientsTest do
           method == :post and path == "/api/parser/ingredients" ->
             {:ok, parsed_ingredients}
 
+          # `Mealie.import_recipe/1` does `GET /api/recipes/{slug}` first and
+          # only proceeds to `POST /api/recipes` on a `:not_found` error (see
+          # the bug 1 fix in `maybe_create_recipe/2`). The stub mirrors what
+          # `InstaMealie.HttpClassify` produces from a real 404 so the create
+          # branch fires. The default catch-all below would otherwise return
+          # `{:ok, %{}}`, which the production `get_recipe/1` translates into
+          # `Error{class: :api_error, summary: "get response missing slug"}`
+          # — NOT a not_found, which would (correctly) fail the import.
+          method == :get and String.starts_with?(path, "/api/recipes/") and
+              not String.ends_with?(path, "/image") ->
+            {:error, Error.new(:not_found, "not found")}
+
           true ->
             {:ok, %{}}
         end
