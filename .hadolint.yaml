@@ -1,0 +1,11 @@
+---
+ignored:
+  - DL3018    # Pin versions in apk add
+  - DL3013    # Pin versions in pip install
+  - DL3008    # Pin versions in apt-get install
+  - DL4006    # Set SHELL option -o pipefail
+  - SC3060    # shellcheck disable
+  # The Wolfi base image is pinned to `:latest` and bumped manually; InstaMealie
+  # does not run Renovate, so DL3007 is accepted for the same reason as in
+  # bedrock-containers.
+  - DL3007
