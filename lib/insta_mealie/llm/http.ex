@@ -49,6 +49,8 @@ defmodule InstaMealie.LLM.Http do
 
       with :ok <- InstaMealie.HttpClassify.classify(resp.status) do
         {:ok, resp.body}
+      else
+        %Error{} = error -> {:error, error}
       end
     rescue
       e -> {:error, Error.new(:network, Exception.message(e))}

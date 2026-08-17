@@ -1,3 +1,33 @@
+defmodule FakeLLMServer do
+  @moduledoc false
+  # Minimal Plug server that always returns 401 to any /chat/completions
+  # request. Used by the `Http.chat/2 against a real non-2xx response`
+  # describe block to drive the production Req → HttpClassify path that
+  # the Mox-based tests stub over. The single-status design is intentional:
+  # 401 classifies as `:auth`, which is the cleanest probe for both bugs:
+  #
+  #   * Bug 1 (Http.chat/2) — must wrap the bare `%Error{}` in a tuple.
+  #   * Bug 2 (LLM.request_llm/3) — must propagate the `:auth` class
+  #     verbatim rather than rewrapping it as `:api_error`.
+
+  use Plug.Router
+
+  plug :match
+  plug :dispatch
+
+  post "/chat/completions" do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(401, Jason.encode!(%{"error" => %{"message" => "Invalid API key"}}))
+  end
+
+  match _ do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(404, Jason.encode!(%{"detail" => "not found"}))
+  end
+end
+
 defmodule InstaMealie.LLMTest do
   use ExUnit.Case, async: true
 
@@ -886,6 +916,89 @@ defmodule InstaMealie.LLMTest do
 
       assert {:error, %Error{class: :api_error}} =
                LLM.merge(nil, {"caption", "transcript", nil}, output_language: "en")
+    end
+  end
+
+  # ── Real HTTP chat/2 regression ─────────────────────────────────
+  # The Mox-based tests above stub at the Adapter boundary, which is
+  # exactly why the bare-%Error{} bug in `LLM.Http.chat/2` and the
+  # rewrap-corruption bug in `LLM.request_llm/3` had zero coverage.
+  # This describe stands up a real Bandit server returning 401, points
+  # `:openai, :base_url` at it, and exercises the full Req →
+  # HttpClassify → chat/2 → request_llm/3 path that production runs.
+  #
+  # Pre-fix:
+  #   * Bug 1 — `chat/2` returned a bare `%Error{}` (the unmatched `with`
+  #     value), violating the `{:ok, _} | {:error, _}` Adapter contract.
+  #   * Bug 2 — `request_llm/3` either rewrapped an `:auth` Error into
+  #     `:api_error` (corrupting retry semantics — `:auth` is
+  #     non-retryable, `:api_error` is retryable) or, if Bug 1 was
+  #     already fixed, hit `Logger.error("... reason=#{reason}")` with
+  #     a `%Error{}` reason and raised `Protocol.UndefinedError` from
+  #     the implicit `String.Chars.to_string/1` call.
+  #
+  # Post-fix:
+  #   * chat/2 returns `{:error, %Error{class: :auth}}` directly.
+  #   * request_llm/3 propagates that struct as-is, so the class
+  #     survives all the way to the pipeline caller.
+
+  describe "Http.chat/2 against a real non-2xx response" do
+    setup do
+      {:ok, sock} = :gen_tcp.listen(0, [])
+      {:ok, port} = :inet.port(sock)
+      :gen_tcp.close(sock)
+
+      {:ok, server_pid} = Bandit.start_link(plug: FakeLLMServer, port: port)
+
+      prev_openai = Application.get_env(:insta_mealie, :openai, [])
+
+      base = "http://127.0.0.1:#{port}"
+
+      Application.put_env(
+        :insta_mealie,
+        :openai,
+        Keyword.put(prev_openai, :base_url, base)
+      )
+
+      # Other tests in this module install `InstaMealie.LLM.Mock` via
+      # Application.put_env. Delete the override so `LLM.request_llm/3`
+      # resolves `InstaMealie.LLM.Http` and exercises the real Req path.
+      Application.delete_env(:insta_mealie, InstaMealie.LLM)
+
+      on_exit(fn ->
+        Process.exit(server_pid, :kill)
+
+        case prev_openai do
+          [] -> Application.delete_env(:insta_mealie, :openai)
+          kw -> Application.put_env(:insta_mealie, :openai, kw)
+        end
+      end)
+
+      {:ok, port: port}
+    end
+
+    test "chat/2 returns {:error, %Error{class: :auth}} on a 401 response (Bug 1 regression)" do
+      # Pre-fix, the `with :ok <- ...` in chat/2 had no `else` clause and
+      # returned the bare `%Error{}` it received from HttpClassify — the
+      # Adapter contract `{:ok, _} | {:error, _}` was violated, and any
+      # caller doing `{:error, %Error{}} = chat(...)` would crash with
+      # `MatchError` (or `WithClauseError` inside a `with`).
+      assert {:error, %Error{class: :auth}} =
+               InstaMealie.LLM.Http.chat("test-model", [
+                 %{role: "user", content: "hi"}
+               ])
+    end
+
+    test "request_llm/3 preserves the class returned by Http.chat/2 (Bug 2 regression)" do
+      # Pre-fix, request_llm/3 either saw a bare `%Error{}` from chat/2
+      # (Bug 1) and skipped `llm_error` entirely — leaving the caller with
+      # a bare struct — or, if Bug 1 was already fixed, fed the struct
+      # into `llm_error(:api_error, reason, ...)`, which both raised
+      # `Protocol.UndefinedError` from the `Logger.error` interpolation
+      # AND corrupted retry semantics by rewrapping `:auth` (non-retryable)
+      # as `:api_error` (retryable).
+      assert {:error, %Error{class: :auth}} =
+               LLM.format({"test caption", [], []}, output_language: "en")
     end
   end
 end

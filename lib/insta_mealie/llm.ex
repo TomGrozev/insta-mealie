@@ -138,6 +138,9 @@ defmodule InstaMealie.LLM do
 
       {:ok, envelope}
     else
+      {:error, %Error{} = error} ->
+        {:error, error}
+
       {:error, reason} ->
         llm_error(:api_error, reason, op, elapsed, model)
     end
