@@ -9,3 +9,8 @@ ignored:
   # does not run Renovate, so DL3007 is accepted for the same reason as in
   # bedrock-containers.
   - DL3007
+  # The build stage splits `mix deps.{get,compile}`, `mix assets.{setup,deploy}`
+  # into separate RUN layers deliberately so expensive layers are cached across
+  # infrequent changes (issue #15 layer-order decision). Consolidating them would
+  # defeat that caching, so DL3059 (multiple consecutive RUN) is accepted.
+  - DL3059
