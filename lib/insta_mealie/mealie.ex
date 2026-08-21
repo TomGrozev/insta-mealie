@@ -13,8 +13,8 @@ defmodule InstaMealie.Mealie do
   require Logger
 
   alias InstaMealie.Error
-  alias InstaMealie.Recipe
   alias InstaMealie.Mealie.RecipeRef
+  alias InstaMealie.Recipe
 
   # ── Public API ─────────────────────────────────────────────────────
 
@@ -29,6 +29,7 @@ defmodule InstaMealie.Mealie do
     "#{base}/g/#{group}/r/#{slug}?edit=true"
   end
 
+  @doc "Search Mealie's food collection for items matching `term`."
   @spec search_foods(String.t()) :: {:ok, list()} | {:error, Error.t()}
   def search_foods(term) when is_binary(term), do: search_collection("foods", term)
 
@@ -70,6 +71,7 @@ defmodule InstaMealie.Mealie do
     end
   end
 
+  @doc "Search Mealie's unit collection for items matching `term`."
   @spec search_units(String.t()) :: {:ok, list()} | {:error, Error.t()}
   def search_units(term) when is_binary(term), do: search_collection("units", term)
 
@@ -111,6 +113,7 @@ defmodule InstaMealie.Mealie do
     end
   end
 
+  @doc "Parse a list of ingredient lines via Mealie, returning classified items."
   @spec parse_ingredients(list(String.t())) :: {:ok, list(map())} | {:error, Error.t()}
   def parse_ingredients(list) when is_list(list) do
     case request(:post, "/api/parser/ingredients", %{"ingredients" => list}) do
@@ -303,9 +306,9 @@ defmodule InstaMealie.Mealie do
   defp resolve_categories(names) when is_list(names), do: resolve_tag_refs(names, "categories")
 
   defp resolve_tag_refs(names, kind) when is_list(names) and is_binary(kind) do
-    with {:ok, by_slug} <- fetch_organizer_index(kind),
-         {:ok, refs} <- resolve_names_against(names, by_slug, kind) do
-      {:ok, refs}
+    case fetch_organizer_index(kind) do
+      {:ok, by_slug} -> resolve_names_against(names, by_slug, kind)
+      {:error, %Error{} = error} -> {:error, error}
     end
   end
 
@@ -336,25 +339,36 @@ defmodule InstaMealie.Mealie do
   end
 
   defp resolve_names_against(names, by_slug, kind) do
-    case Enum.reduce_while(names, {:ok, []}, fn name, {:ok, acc} ->
-           slug = slugify(name)
+    result =
+      Enum.reduce_while(names, {:ok, []}, fn name, {:ok, acc} ->
+        resolve_organizer_ref(name, by_slug, kind, acc)
+      end)
 
-           case Map.fetch(by_slug, slug) do
-             {:ok, ref} ->
-               {:cont, {:ok, [ref | acc]}}
-
-             :error ->
-               case request(:post, "/api/organizers/#{kind}", %{name: name}) do
-                 {:ok, %{"id" => id, "name" => n, "slug" => s}} ->
-                   {:cont, {:ok, [%{"id" => id, "name" => n, "slug" => s} | acc]}}
-
-                 {:error, %Error{} = error} ->
-                   {:halt, {:error, error}}
-               end
-           end
-         end) do
+    case result do
       {:ok, refs} -> {:ok, Enum.reverse(refs)}
       {:error, %Error{} = error} -> {:error, error}
+    end
+  end
+
+  defp resolve_organizer_ref(name, by_slug, kind, acc) do
+    slug = slugify(name)
+
+    case Map.fetch(by_slug, slug) do
+      {:ok, ref} ->
+        {:cont, {:ok, [ref | acc]}}
+
+      :error ->
+        create_organizer_ref(name, kind, acc)
+    end
+  end
+
+  defp create_organizer_ref(name, kind, acc) do
+    case request(:post, "/api/organizers/#{kind}", %{name: name}) do
+      {:ok, %{"id" => id, "name" => n, "slug" => s}} ->
+        {:cont, {:ok, [%{"id" => id, "name" => n, "slug" => s} | acc]}}
+
+      {:error, %Error{} = error} ->
+        {:halt, {:error, error}}
     end
   end
 

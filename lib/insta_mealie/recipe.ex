@@ -308,12 +308,10 @@ defmodule InstaMealie.Recipe do
   defp clean_yield(text) when is_binary(text) do
     trimmed = String.trim(text)
 
-    cond do
-      trimmed == "" ->
-        {0, 0, ""}
-
-      true ->
-        parse_yield_pattern(trimmed, text)
+    if trimmed == "" do
+      {0, 0, ""}
+    else
+      parse_yield_pattern(trimmed, text)
     end
   end
 
@@ -380,25 +378,32 @@ defmodule InstaMealie.Recipe do
   defp parse_yield_number(str) do
     trimmed = String.trim(str)
 
-    with {f, ""} <- Float.parse(trimmed) do
-      {:ok, normalise_yield_number(f)}
-    else
-      _ ->
-        case String.split(trimmed, "/") do
-          [num, denom] ->
-            with {n, ""} <- Float.parse(String.trim(num)),
-                 {d, ""} <- Float.parse(String.trim(denom)),
-                 d != 0 do
-              {:ok, normalise_yield_number(n / d)}
-            else
-              _ -> :error
-            end
+    case Float.parse(trimmed) do
+      {f, ""} ->
+        {:ok, normalise_yield_number(f)}
 
-          _ ->
-            :error
-        end
+      _ ->
+        parse_fraction(trimmed)
     end
   end
+
+  defp parse_fraction(trimmed) do
+    case String.split(trimmed, "/") do
+      [num, denom] ->
+        with {n, ""} <- Float.parse(String.trim(num)),
+             {d, ""} <- Float.parse(String.trim(denom)) do
+          divide_normalised(n, d)
+        else
+          _ -> :error
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp divide_normalised(_n, 0), do: :error
+  defp divide_normalised(n, d), do: {:ok, normalise_yield_number(n / d)}
 
   defp normalise_yield_number(f) when is_float(f) do
     if f == Float.floor(f), do: trunc(f), else: f

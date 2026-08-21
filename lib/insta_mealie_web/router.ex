@@ -1,4 +1,6 @@
 defmodule InstaMealieWeb.Router do
+  @moduledoc false
+
   use InstaMealieWeb, :router
 
   pipeline :browser do

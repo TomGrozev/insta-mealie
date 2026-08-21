@@ -52,12 +52,12 @@ defmodule InstaMealie.Pipeline.Job do
 
   require Logger
 
-  alias InstaMealie.Pipeline
   alias InstaMealie.Error
-  alias InstaMealie.Mealie
-  alias InstaMealie.Recipe
   alias InstaMealie.Ingredient
+  alias InstaMealie.Mealie
+  alias InstaMealie.Pipeline
   alias InstaMealie.Pipeline.{JobAdmission, JobStore}
+  alias InstaMealie.Recipe
 
   defstruct [
     :id,
@@ -86,6 +86,31 @@ defmodule InstaMealie.Pipeline.Job do
 
   @type stage ::
           :fetch | :llm_format | :scrape_link | :transcribe | :llm_merge | :mealie_import
+
+  @type t :: %__MODULE__{
+          id: binary() | nil,
+          input: String.t() | nil,
+          url: String.t() | nil,
+          caption: String.t() | nil,
+          mode: :caption_only | :url | nil,
+          state: atom() | nil,
+          stage: stage() | nil,
+          stages: [atom()] | nil,
+          recipe: InstaMealie.Recipe.t() | nil,
+          verdict: term(),
+          missing_fields: [atom()] | nil,
+          slug: String.t() | nil,
+          deep_link: String.t() | nil,
+          error_stage: atom() | nil,
+          error_class: atom() | nil,
+          error_summary: String.t() | nil,
+          retry_count: map() | nil,
+          output_language: String.t() | nil,
+          stage_started_at: DateTime.t() | nil,
+          stage_generations: map() | nil,
+          inserted_at: DateTime.t() | nil,
+          updated_at: DateTime.t() | nil
+        }
 
   # ---- GenServer lifecycle ----
 
@@ -627,10 +652,9 @@ defmodule InstaMealie.Pipeline.Job do
 
     task =
       Task.Supervisor.async_nolink(InstaMealie.Pipeline.TaskSupervisor, fn ->
-        with {:ok, audio} <-
-               InstaMealie.YtDlp.fetch_audio(job.url, output_dir: Map.get(fetch, :fetch_dir)),
-             {:ok, transcript} <- InstaMealie.Whisper.transcribe(audio.audio_path, []) do
-          {:ok, transcript}
+        case InstaMealie.YtDlp.fetch_audio(job.url, output_dir: Map.get(fetch, :fetch_dir)) do
+          {:ok, audio} -> InstaMealie.Whisper.transcribe(audio.audio_path, [])
+          other -> other
         end
       end)
 

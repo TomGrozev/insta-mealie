@@ -4,6 +4,8 @@ defmodule InstaMealie.Pipeline.Sweeper do
 
   alias InstaMealie.Pipeline.JobStore
 
+  @doc "Start the sweeper GenServer, creating the ETS job table on init."
+  @spec start_link(any()) :: GenServer.on_start()
   def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   @impl true

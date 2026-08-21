@@ -33,6 +33,7 @@ defmodule InstaMealie.YtDlp.Cli do
   # ---- fetch_metadata ----
 
   @impl true
+  @spec fetch_metadata(String.t(), keyword()) :: {:ok, map()} | {:error, Error.t()}
   def fetch_metadata(url, opts \\ []) when is_binary(url) do
     case System.find_executable("yt-dlp") do
       nil ->
@@ -65,6 +66,7 @@ defmodule InstaMealie.YtDlp.Cli do
   # ---- fetch_audio ----
 
   @impl true
+  @spec fetch_audio(String.t(), keyword()) :: {:ok, map()} | {:error, Error.t()}
   def fetch_audio(url, opts \\ []) when is_binary(url) do
     case System.find_executable("yt-dlp") do
       nil ->
@@ -103,6 +105,7 @@ defmodule InstaMealie.YtDlp.Cli do
   missing or unsupported impersonation target degrades gracefully (returns
   `:degraded`) rather than raising.
   """
+  @spec preflight!() :: map()
   def preflight! do
     ytdlp =
       System.find_executable("yt-dlp") ||

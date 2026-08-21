@@ -20,8 +20,15 @@ defmodule InstaMealie.Pipeline.JobAdmission do
 
   defstruct [:queue, :active, :max]
 
+  @type t :: %__MODULE__{
+          queue: :queue.queue(),
+          active: MapSet.t(),
+          max: non_neg_integer()
+        }
+
   # -- public API --
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     max = Keyword.get(opts, :max, max_concurrency())
     GenServer.start_link(__MODULE__, max, name: __MODULE__)
@@ -33,6 +40,7 @@ defmodule InstaMealie.Pipeline.JobAdmission do
   must wait. When a slot opens, the next queued job is automatically
   started — the caller does not need to poll.
   """
+  @spec request(term()) :: :admitted | {:queued, pos_integer()}
   def request(job_id) do
     GenServer.call(__MODULE__, {:request, job_id})
   end
@@ -42,6 +50,7 @@ defmodule InstaMealie.Pipeline.JobAdmission do
   on a non-active job is a no-op. Triggers admission of the next queued
   job, if any.
   """
+  @spec release(term()) :: :ok
   def release(job_id) do
     GenServer.cast(__MODULE__, {:release, job_id})
   end
@@ -50,6 +59,7 @@ defmodule InstaMealie.Pipeline.JobAdmission do
   Cancel a queued (not-yet-started) job. Returns `:ok` if the job was
   removed from the queue, or `:not_queued`.
   """
+  @spec cancel(term()) :: :ok | :not_queued
   def cancel(job_id) do
     GenServer.call(__MODULE__, {:cancel, job_id})
   end
@@ -58,6 +68,7 @@ defmodule InstaMealie.Pipeline.JobAdmission do
   Get the queue position for a waiting job. Returns `{:queued, pos}` or
   `:not_queued`.
   """
+  @spec position(term()) :: {:queued, pos_integer()} | :not_queued
   def position(job_id) do
     GenServer.call(__MODULE__, {:position, job_id})
   end
@@ -66,6 +77,7 @@ defmodule InstaMealie.Pipeline.JobAdmission do
   Clear the active set and queue. Intended for tests; do not call from
   production code paths.
   """
+  @spec reset() :: :ok
   def reset do
     GenServer.call(__MODULE__, :reset)
   end

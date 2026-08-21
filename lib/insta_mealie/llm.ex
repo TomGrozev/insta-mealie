@@ -5,6 +5,13 @@ defmodule InstaMealie.LLM.Envelope do
   Carried through the pipeline as the output of `LLM.format/2` and `LLM.merge/3`.
   """
   defstruct [:recipe, :completeness, :missing_fields, :consult_link]
+
+  @type t :: %__MODULE__{
+          recipe: map() | nil,
+          completeness: :recipe_complete | :recipe_partial | :no_recipe | nil,
+          missing_fields: [atom()] | nil,
+          consult_link: boolean() | nil
+        }
 end
 
 defmodule InstaMealie.LLM do
@@ -86,6 +93,10 @@ defmodule InstaMealie.LLM do
 
   # ── Public API ─────────────────────────────────────────────────────
 
+  @doc """
+  Ask the LLM to turn a reel caption (+ comments and candidate links) into a
+  recipe verdict envelope.
+  """
   @spec format(sources :: {String.t(), list(), [String.t()]}, keyword()) ::
           {:ok, envelope} | {:error, Error.t()}
   def format(sources, opts \\ []) when is_tuple(sources) do
@@ -101,6 +112,10 @@ defmodule InstaMealie.LLM do
     request_llm(:format, model, messages)
   end
 
+  @doc """
+  Ask the LLM to merge a draft recipe with caption, transcript, and an
+  optional linked recipe, returning an updated verdict envelope.
+  """
   @spec merge(
           Recipe.t() | nil,
           sources :: {String.t(), String.t() | nil, Recipe.t() | nil},
@@ -266,36 +281,34 @@ defmodule InstaMealie.LLM do
   def parse_human_duration(str) when is_binary(str) do
     str = str |> String.trim() |> String.downcase()
 
-    cond do
-      # Already ISO-8601
-      String.match?(str, @iso8601_re) ->
-        {:ok, str}
-
+    # Already ISO-8601
+    if String.match?(str, @iso8601_re) do
+      {:ok, str}
+    else
       # Try to extract hours + minutes
-      true ->
-        hours = extract_hours(str)
-        minutes = extract_minutes(str)
+      hours = extract_hours(str)
+      minutes = extract_minutes(str)
 
-        cond do
-          hours > 0 or minutes > 0 ->
-            build_iso(hours, minutes)
+      cond do
+        hours > 0 or minutes > 0 ->
+          build_iso(hours, minutes)
 
-          # Try "90 min" or "90 minutes" (minutes only, no space-based compound)
-          Regex.match?(~r/(\d+)\s*min(?:ute)?s?\b/, str) ->
-            [_, m] = Regex.run(~r/(\d+)\s*min(?:ute)?s?\b/, str)
-            build_iso(0, String.to_integer(m))
+        # Try "90 min" or "90 minutes" (minutes only, no space-based compound)
+        Regex.match?(~r/(\d+)\s*min(?:ute)?s?\b/, str) ->
+          [_, m] = Regex.run(~r/(\d+)\s*min(?:ute)?s?\b/, str)
+          build_iso(0, String.to_integer(m))
 
-          # Try bare number like "1.5" (assume hours)
-          Regex.match?(~r/^(\d+(?:\.\d+)?)\s*$/, str) ->
-            [_, n] = Regex.run(~r/^(\d+(?:\.\d+)?)$/, str)
-            val = elem(Float.parse(n), 0)
-            h = floor(val)
-            m = round((val - h) * 60)
-            build_iso(h, m)
+        # Try bare number like "1.5" (assume hours)
+        Regex.match?(~r/^(\d+(?:\.\d+)?)\s*$/, str) ->
+          [_, n] = Regex.run(~r/^(\d+(?:\.\d+)?)$/, str)
+          val = elem(Float.parse(n), 0)
+          h = floor(val)
+          m = round((val - h) * 60)
+          build_iso(h, m)
 
-          true ->
-            :error
-        end
+        true ->
+          :error
+      end
     end
   end
 

@@ -18,15 +18,19 @@ defmodule InstaMealie.YtDlp do
   """
   alias InstaMealie.Error
 
+  @doc "Fetch metadata (author, caption, comments, thumbnail) without downloading media."
   @callback fetch_metadata(url :: String.t(), opts :: keyword()) ::
               {:ok, map()} | {:error, Error.t()}
 
+  @doc "Download audio from the given reel."
   @callback fetch_audio(url :: String.t(), opts :: keyword()) ::
               {:ok, map()} | {:error, Error.t()}
 
+  @doc "Fetch metadata (author, caption, comments, thumbnail) without downloading media."
   @spec fetch_metadata(String.t(), keyword()) :: {:ok, map()} | {:error, Error.t()}
   def fetch_metadata(url, opts \\ []), do: impl().fetch_metadata(url, opts)
 
+  @doc "Download audio from the given reel."
   @spec fetch_audio(String.t(), keyword()) :: {:ok, map()} | {:error, Error.t()}
   def fetch_audio(url, opts \\ []), do: impl().fetch_audio(url, opts)
 

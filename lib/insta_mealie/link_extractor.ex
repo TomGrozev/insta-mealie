@@ -36,6 +36,12 @@ defmodule InstaMealie.LinkExtractor do
     rewardstyle.com
   )
 
+  @doc """
+  Extract candidate URLs from a reel caption and its OP comments.
+
+  Returns the deduplicated list of links after stripping trailing
+  punctuation and dropping known-bio-link hosts (see `@skip_hosts`).
+  """
   @spec extract(String.t(), list(map())) :: [String.t()]
   def extract(caption, comments) do
     caption_urls = urls_in(caption)

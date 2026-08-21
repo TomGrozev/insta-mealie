@@ -18,6 +18,7 @@ defmodule InstaMealieWeb.Layouts do
 
   slot :inner_block, required: true
 
+  @spec app(Phoenix.LiveView.Socket.assigns()) :: Phoenix.LiveView.Rendered.t()
   def app(assigns) do
     ~H"""
     <div class="flex min-h-screen flex-col bg-base-100 bg-[radial-gradient(70%_45%_at_50%_-5%,rgba(242,163,15,0.12),transparent)]">
@@ -52,6 +53,7 @@ defmodule InstaMealieWeb.Layouts do
   attr :flash, :map, required: true, doc: "the map of flash messages"
   attr :id, :string, default: "flash-group", doc: "the optional id of flash container"
 
+  @spec flash_group(Phoenix.LiveView.Socket.assigns()) :: Phoenix.LiveView.Rendered.t()
   def flash_group(assigns) do
     ~H"""
     <div id={@id} aria-live="polite">
@@ -94,6 +96,7 @@ defmodule InstaMealieWeb.Layouts do
   @doc """
   Provides dark vs light theme toggle based on themes defined in app.css.
   """
+  @spec theme_toggle(Phoenix.LiveView.Socket.assigns()) :: Phoenix.LiveView.Rendered.t()
   def theme_toggle(assigns) do
     ~H"""
     <div class="card relative flex flex-row items-center border border-base-300 bg-base-200 rounded-full">

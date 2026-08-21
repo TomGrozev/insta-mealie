@@ -14,6 +14,12 @@ defmodule InstaMealie.Whisper do
   require Logger
   alias InstaMealie.Error
 
+  @doc """
+  Transcribe the audio file at `audio_path` and return the transcript text.
+
+  Supports the `:prompt` and `:language` options. Returns `{:error, %Error{}}`
+  when the adapter reports a failure.
+  """
   @spec transcribe(String.t(), keyword()) :: {:ok, String.t()} | {:error, Error.t()}
   def transcribe(audio_path, opts \\ []) when is_binary(audio_path) do
     adapter = Application.get_env(:insta_mealie, InstaMealie.Whisper, InstaMealie.Whisper.Http)

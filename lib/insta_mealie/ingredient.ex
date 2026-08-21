@@ -2,6 +2,12 @@ defmodule InstaMealie.Ingredient.Ref do
   @moduledoc "A Mealie food or unit as resolved for one ingredient: its name, its Mealie id, and the parser's confidence in the match."
   defstruct [:name, :id, :confidence]
 
+  @type t :: %__MODULE__{
+          name: String.t() | nil,
+          id: String.t() | nil,
+          confidence: number() | nil
+        }
+
   @doc "Returns true when this ref has a Mealie id (i.e., it has been resolved)."
   def resolved?(%__MODULE__{id: id}) when is_binary(id), do: true
   def resolved?(%__MODULE__{}), do: false
@@ -303,22 +309,24 @@ defmodule InstaMealie.Ingredient do
     payload = %{}
 
     payload =
-      if not is_nil(ing.quantity), do: Map.put(payload, "quantity", ing.quantity), else: payload
+      if is_nil(ing.quantity), do: payload, else: Map.put(payload, "quantity", ing.quantity)
 
     # Omit food/unit when there's no ID — Mealie's ORM requires ID for MANYTOONE
     # relationships. Omitting preserves whatever exists in Mealie (PATCH merges).
     food =
-      cond do
-        ing.food.id && ing.food.name -> %{"id" => ing.food.id, "name" => ing.food.name}
-        true -> nil
+      if ing.food.id && ing.food.name do
+        %{"id" => ing.food.id, "name" => ing.food.name}
+      else
+        nil
       end
 
     payload = if food, do: Map.put(payload, "food", food), else: payload
 
     unit =
-      cond do
-        ing.unit.id && ing.unit.name -> %{"id" => ing.unit.id, "name" => ing.unit.name}
-        true -> nil
+      if ing.unit.id && ing.unit.name do
+        %{"id" => ing.unit.id, "name" => ing.unit.name}
+      else
+        nil
       end
 
     payload = if unit, do: Map.put(payload, "unit", unit), else: payload

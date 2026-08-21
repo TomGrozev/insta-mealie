@@ -1,4 +1,6 @@
 defmodule InstaMealieWeb.ReviewLive do
+  @moduledoc false
+
   use InstaMealieWeb, :live_view
 
   alias InstaMealie.Error
@@ -13,53 +15,51 @@ defmodule InstaMealieWeb.ReviewLive do
     job = Pipeline.get_job(id)
 
     socket =
-      cond do
-        job == nil or job.state != :needs_review ->
-          socket
-          |> assign(:job, job)
-          |> assign(:not_reviewable, true)
+      if job == nil or job.state != :needs_review do
+        socket
+        |> assign(:job, job)
+        |> assign(:not_reviewable, true)
+      else
+        ingredients = (job.recipe && job.recipe.ingredients) || []
 
-        true ->
-          ingredients = (job.recipe && job.recipe.ingredients) || []
+        {food_candidates, unit_candidates, selected_food, selected_unit, food_terms, unit_terms} =
+          Enum.reduce(ingredients, {%{}, %{}, %{}, %{}, %{}, %{}}, fn ing, acc ->
+            {fc, uc, sf, su, ft, ut} = acc
+            i = ing.index
 
-          {food_candidates, unit_candidates, selected_food, selected_unit, food_terms, unit_terms} =
-            Enum.reduce(ingredients, {%{}, %{}, %{}, %{}, %{}, %{}}, fn ing, acc ->
-              {fc, uc, sf, su, ft, ut} = acc
-              i = ing.index
+            food_term = ing.food.name || ing.raw || ""
+            unit_term = ing.unit.name || ""
 
-              food_term = ing.food.name || ing.raw || ""
-              unit_term = ing.unit.name || ""
+            food_cands = source_food_suggestions(food_term)
+            unit_cands = source_unit_suggestions(unit_term)
 
-              food_cands = source_food_suggestions(food_term)
-              unit_cands = source_unit_suggestions(unit_term)
+            {
+              Map.put(fc, i, food_cands),
+              Map.put(uc, i, unit_cands),
+              Map.put(sf, i, initial_food_value(ing, food_cands)),
+              Map.put(su, i, initial_unit_value(ing, unit_cands)),
+              Map.put(ft, i, ""),
+              Map.put(ut, i, "")
+            }
+          end)
 
-              {
-                Map.put(fc, i, food_cands),
-                Map.put(uc, i, unit_cands),
-                Map.put(sf, i, initial_food_value(ing, food_cands)),
-                Map.put(su, i, initial_unit_value(ing, unit_cands)),
-                Map.put(ft, i, ""),
-                Map.put(ut, i, "")
-              }
-            end)
-
-          socket
-          |> assign(:job, job)
-          |> assign(:not_reviewable, false)
-          |> assign(:recipe_name, job.recipe && job.recipe.name)
-          |> assign(:ingredients, ingredients)
-          |> assign(:food_candidates, food_candidates)
-          |> assign(:unit_candidates, unit_candidates)
-          |> assign(:food_search_results, %{})
-          |> assign(:unit_search_results, %{})
-          |> assign(:food_search_terms, food_terms)
-          |> assign(:unit_search_terms, unit_terms)
-          |> assign(:selected_food, selected_food)
-          |> assign(:selected_unit, selected_unit)
-          |> assign(:imported, false)
-          |> assign(:dead, false)
-          |> assign(:import_error, nil)
-          |> assign(:deep_link, nil)
+        socket
+        |> assign(:job, job)
+        |> assign(:not_reviewable, false)
+        |> assign(:recipe_name, job.recipe && job.recipe.name)
+        |> assign(:ingredients, ingredients)
+        |> assign(:food_candidates, food_candidates)
+        |> assign(:unit_candidates, unit_candidates)
+        |> assign(:food_search_results, %{})
+        |> assign(:unit_search_results, %{})
+        |> assign(:food_search_terms, food_terms)
+        |> assign(:unit_search_terms, unit_terms)
+        |> assign(:selected_food, selected_food)
+        |> assign(:selected_unit, selected_unit)
+        |> assign(:imported, false)
+        |> assign(:dead, false)
+        |> assign(:import_error, nil)
+        |> assign(:deep_link, nil)
       end
 
     {:ok, socket}
@@ -112,71 +112,80 @@ defmodule InstaMealieWeb.ReviewLive do
   def handle_event("select-option", params, socket) do
     field = review_param(params, "field")
 
-    with {:ok, index} <- resolve_index(params, field),
-         value = review_param(params, "value") do
-      socket =
-        case field do
-          "food" ->
-            assign(
-              socket,
-              :selected_food,
-              Map.put(socket.assigns.selected_food, index, value)
-            )
+    case resolve_index(params, field) do
+      {:ok, index} ->
+        value = review_param(params, "value")
 
-          "unit" ->
-            assign(
-              socket,
-              :selected_unit,
-              Map.put(socket.assigns.selected_unit, index, value)
-            )
+        socket =
+          case field do
+            "food" ->
+              assign(
+                socket,
+                :selected_food,
+                Map.put(socket.assigns.selected_food, index, value)
+              )
 
-          _ ->
-            socket
-        end
+            "unit" ->
+              assign(
+                socket,
+                :selected_unit,
+                Map.put(socket.assigns.selected_unit, index, value)
+              )
 
-      {:noreply, socket}
-    else
-      :error -> {:noreply, socket}
+            _ ->
+              socket
+          end
+
+        {:noreply, socket}
+
+      :error ->
+        {:noreply, socket}
     end
   end
 
   def handle_event("search-food", params, socket) do
-    with {:ok, index} <- resolve_index(params, "food"),
-         term = review_param(params, "food_#{index}") || "" do
-      results = search_foods_safe(term)
+    case resolve_index(params, "food") do
+      {:ok, index} ->
+        term = review_param(params, "food_#{index}") || ""
 
-      socket =
-        socket
-        |> assign(:selected_food, Map.put(socket.assigns.selected_food, index, term))
-        |> assign(:food_search_terms, Map.put(socket.assigns.food_search_terms, index, term))
-        |> assign(
-          :food_search_results,
-          Map.put(socket.assigns.food_search_results, index, results)
-        )
+        results = search_foods_safe(term)
 
-      {:noreply, socket}
-    else
-      :error -> {:noreply, socket}
+        socket =
+          socket
+          |> assign(:selected_food, Map.put(socket.assigns.selected_food, index, term))
+          |> assign(:food_search_terms, Map.put(socket.assigns.food_search_terms, index, term))
+          |> assign(
+            :food_search_results,
+            Map.put(socket.assigns.food_search_results, index, results)
+          )
+
+        {:noreply, socket}
+
+      :error ->
+        {:noreply, socket}
     end
   end
 
   def handle_event("search-unit", params, socket) do
-    with {:ok, index} <- resolve_index(params, "unit"),
-         term = review_param(params, "unit_#{index}") || "" do
-      results = search_units_safe(term)
+    case resolve_index(params, "unit") do
+      {:ok, index} ->
+        term = review_param(params, "unit_#{index}") || ""
 
-      socket =
-        socket
-        |> assign(:selected_unit, Map.put(socket.assigns.selected_unit, index, term))
-        |> assign(:unit_search_terms, Map.put(socket.assigns.unit_search_terms, index, term))
-        |> assign(
-          :unit_search_results,
-          Map.put(socket.assigns.unit_search_results, index, results)
-        )
+        results = search_units_safe(term)
 
-      {:noreply, socket}
-    else
-      :error -> {:noreply, socket}
+        socket =
+          socket
+          |> assign(:selected_unit, Map.put(socket.assigns.selected_unit, index, term))
+          |> assign(:unit_search_terms, Map.put(socket.assigns.unit_search_terms, index, term))
+          |> assign(
+            :unit_search_results,
+            Map.put(socket.assigns.unit_search_results, index, results)
+          )
+
+        {:noreply, socket}
+
+      :error ->
+        {:noreply, socket}
     end
   end
 
@@ -265,11 +274,12 @@ defmodule InstaMealieWeb.ReviewLive do
   end
 
   defp resolve_index(params, field) when is_map(params) do
-    with :error <- resolve_explicit_index(params),
-         :error <- resolve_field_key_index(params, field),
-         :error <- resolve_target_index(params) do
-      :error
-    end
+    [
+      resolve_explicit_index(params),
+      resolve_field_key_index(params, field),
+      resolve_target_index(params)
+    ]
+    |> Enum.find(:error, &(&1 != :error))
   end
 
   defp resolve_index(_, _), do: :error
@@ -936,16 +946,18 @@ defmodule InstaMealieWeb.ReviewLive do
   end
 
   defp initial_food_value(ing, cands) do
-    cond do
-      ing.food.name && ing.food.name in cands -> ing.food.name
-      true -> ing.food.name || ing.raw || ""
+    if ing.food.name && ing.food.name in cands do
+      ing.food.name
+    else
+      ing.food.name || ing.raw || ""
     end
   end
 
   defp initial_unit_value(ing, cands) do
-    cond do
-      ing.unit.name && ing.unit.name in cands -> ing.unit.name
-      true -> ing.unit.name || ""
+    if ing.unit.name && ing.unit.name in cands do
+      ing.unit.name
+    else
+      ing.unit.name || ""
     end
   end
 

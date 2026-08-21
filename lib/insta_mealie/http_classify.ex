@@ -3,6 +3,14 @@ defmodule InstaMealie.HttpClassify do
 
   alias InstaMealie.Error
 
+  @doc """
+  Normalise an HTTP status code into `:ok` or a crafted `%Error{}`.
+
+  `2xx` yields `:ok`; known client codes (`401`, `403`, `404`, `422`, `429`)
+  map to specific error classes; other `4xx` become `:api_error` and `5xx`
+  become `:network`.
+  """
+  @spec classify(integer()) :: :ok | Error.t()
   def classify(status) when status in 200..299, do: :ok
   def classify(401), do: Error.new(:auth, "unauthorized")
   def classify(403), do: Error.new(:auth, "forbidden")

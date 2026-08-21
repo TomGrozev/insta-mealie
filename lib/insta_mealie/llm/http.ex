@@ -47,9 +47,8 @@ defmodule InstaMealie.LLM.Http do
       resp = Req.request!(req)
       Logger.debug("[llm] POST #{uri} status=#{resp.status}")
 
-      with :ok <- InstaMealie.HttpClassify.classify(resp.status) do
-        {:ok, resp.body}
-      else
+      case InstaMealie.HttpClassify.classify(resp.status) do
+        :ok -> {:ok, resp.body}
         %Error{} = error -> {:error, error}
       end
     rescue

@@ -1,4 +1,6 @@
 defmodule InstaMealieWeb.JobsLive do
+  @moduledoc false
+
   use InstaMealieWeb, :live_view
 
   alias InstaMealie.Pipeline
@@ -316,6 +318,10 @@ defmodule InstaMealieWeb.JobsLive do
   attr :ghost, :boolean, default: false
   attr :show_labels, :boolean, default: true
 
+  @doc """
+  Renders the ordered pipeline stage progress strip for a job.
+  """
+  @spec pipeline_strip(Phoenix.LiveView.Socket.assigns()) :: Phoenix.LiveView.Rendered.t()
   def pipeline_strip(assigns) do
     stages_order = @stages_order
 
@@ -379,6 +385,10 @@ defmodule InstaMealieWeb.JobsLive do
     """
   end
 
+  @doc """
+  Renders a single job card in the jobs list.
+  """
+  @spec job_card(Phoenix.LiveView.Socket.assigns()) :: Phoenix.LiveView.Rendered.t()
   def job_card(assigns) do
     ~H"""
     <% actions = Pipeline.available_actions(@job) %>

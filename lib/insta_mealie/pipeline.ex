@@ -144,9 +144,9 @@ defmodule InstaMealie.Pipeline do
       actions = []
 
       actions =
-        if job.state not in [:succeeded, :failed, :cancelled],
-          do: [:cancel | actions],
-          else: actions
+        if job.state in [:succeeded, :failed, :cancelled],
+          do: actions,
+          else: [:cancel | actions]
 
       # Paste-caption: available when fetch failed on a URL job.
       actions =
