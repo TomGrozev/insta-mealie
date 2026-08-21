@@ -54,12 +54,12 @@ if config_env() == :dev do
       web_console_logger: true,
       patterns: [
         # Static assets, except user uploads
-        ~r"priv/static/(?!uploads/).*\.(js|css|png|jpeg|jpg|gif|svg)$"E,
+        ~r"priv/static/(?!uploads/).*\.(js|css|png|jpeg|jpg|gif|svg)$",
         # Gettext translations
-        ~r"priv/gettext/.*\.po$"E,
+        ~r"priv/gettext/.*\.po$",
         # Router, Controllers, LiveViews and LiveComponents
-        ~r"lib/insta_mealie_web/router\.ex$"E,
-        ~r"lib/insta_mealie_web/(controllers|live|components)/.*\.(ex|heex)$"E
+        ~r"lib/insta_mealie_web/router\.ex$",
+        ~r"lib/insta_mealie_web/(controllers|live|components)/.*\.(ex|heex)$"
       ]
     ]
 end
