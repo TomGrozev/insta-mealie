@@ -55,6 +55,7 @@ jobs:
         uses: anchore/scan-action@v7
         with:
           grype-version: "v0.114.0"
+          config: .grype.yaml
           image: ${{ steps.image.outputs.base }}:ci-${{ github.sha }}
           severity-cutoff: high
           # Push to the default branch fails the build on high+ vulns; PRs report only.
