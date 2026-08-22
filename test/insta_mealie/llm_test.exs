@@ -1001,4 +1001,217 @@ defmodule InstaMealie.LLMTest do
                LLM.format({"test caption", [], []}, output_language: "en")
     end
   end
+
+  # ── parse_human_duration/1 edge cases (direct unit tests) ───────
+
+  describe "parse_human_duration/1" do
+    test "bare decimal number treats value as hours" do
+      assert LLM.parse_human_duration("1.5") == {:ok, "PT1H30M"}
+      assert LLM.parse_human_duration("2.5") == {:ok, "PT2H30M"}
+    end
+
+    test "bare integer treats value as hours" do
+      assert LLM.parse_human_duration("2") == {:ok, "PT2H"}
+    end
+
+    test "colon format H:MM" do
+      assert LLM.parse_human_duration("1:30") == {:ok, "PT1H30M"}
+      assert LLM.parse_human_duration("0:45") == {:ok, "PT45M"}
+    end
+
+    test "compound h/m forms" do
+      assert LLM.parse_human_duration("1h30m") == {:ok, "PT1H30M"}
+      assert LLM.parse_human_duration("1 hour 30 minutes") == {:ok, "PT1H30M"}
+    end
+
+    test "minutes-only forms" do
+      assert LLM.parse_human_duration("90 min") == {:ok, "PT1H30M"}
+      assert LLM.parse_human_duration("45 minutes") == {:ok, "PT45M"}
+    end
+
+    test "already ISO-8601 passes through" do
+      assert LLM.parse_human_duration("PT1H30M") == {:ok, "PT1H30M"}
+    end
+
+    test "empty string returns :error" do
+      assert LLM.parse_human_duration("") == :error
+    end
+
+    test "unparseable string returns :error" do
+      assert LLM.parse_human_duration("until done") == :error
+    end
+  end
+
+  # ── normalize_durations/1 via envelope_from_json (Step 7) ───────
+
+  describe "envelope_from_json/1 duration normalisation" do
+    test "normalises human-readable '30 minutes' to ISO-8601" do
+      json = %{
+        "completeness" => "recipe_complete",
+        "missing_fields" => [],
+        "recipe" => %{"name" => "T", "totalTime" => "30 minutes"}
+      }
+
+      assert LLM.envelope_from_json(json).recipe.total_time == "PT30M"
+    end
+
+    test "preserves already ISO-8601 'PT30M' as-is" do
+      json = %{
+        "completeness" => "recipe_complete",
+        "missing_fields" => [],
+        "recipe" => %{"name" => "T", "totalTime" => "PT30M"}
+      }
+
+      assert LLM.envelope_from_json(json).recipe.total_time == "PT30M"
+    end
+
+    test "normalises all four duration keys together" do
+      json = %{
+        "completeness" => "recipe_complete",
+        "missing_fields" => [],
+        "recipe" => %{
+          "name" => "T",
+          "totalTime" => "1 hour",
+          "prepTime" => "15 minutes",
+          "cookTime" => "30 min",
+          "performTime" => "1:45"
+        }
+      }
+
+      result = LLM.envelope_from_json(json).recipe
+      assert result.total_time == "PT1H"
+      assert result.prep_time == "PT15M"
+      assert result.cook_time == "PT30M"
+      assert result.perform_time == "PT1H45M"
+    end
+
+    test "non-string duration values are preserved as-is" do
+      json = %{
+        "completeness" => "recipe_complete",
+        "missing_fields" => [],
+        "recipe" => %{"name" => "T", "totalTime" => 30}
+      }
+
+      assert LLM.envelope_from_json(json).recipe.total_time == 30
+    end
+  end
+
+  # ── Message builder tests: format/2 ─────────────────────────────
+
+  describe "format/2 message builder" do
+    test "include OP comments when comments list is non-empty" do
+      envelope_json =
+        Jason.encode!(%{
+          "completeness" => "recipe_complete",
+          "missing_fields" => [],
+          "consult_link" => false,
+          "recipe" => %{"name" => "Test"}
+        })
+
+      Application.put_env(:insta_mealie, InstaMealie.LLM, InstaMealie.LLM.Mock)
+
+      Mox.expect(InstaMealie.LLM.Mock, :chat, fn _model, messages ->
+        last_user = messages |> Enum.reverse() |> Enum.find(&(&1.role == "user"))
+        assert last_user != nil
+        assert last_user.content =~ "OP comments:"
+        assert last_user.content =~ "OP comment text"
+
+        {:ok,
+         %{
+           "choices" => [%{"message" => %{"content" => envelope_json}}]
+         }}
+      end)
+
+      assert {:ok, _result} =
+               LLM.format(
+                 {"Caption", [%{text: "OP comment text"}], []},
+                 output_language: "en"
+               )
+    end
+
+    test "omits OP comments section when comments list is empty" do
+      envelope_json =
+        Jason.encode!(%{
+          "completeness" => "recipe_complete",
+          "missing_fields" => [],
+          "consult_link" => false,
+          "recipe" => %{"name" => "Test"}
+        })
+
+      Application.put_env(:insta_mealie, InstaMealie.LLM, InstaMealie.LLM.Mock)
+
+      Mox.expect(InstaMealie.LLM.Mock, :chat, fn _model, messages ->
+        last_user = messages |> Enum.reverse() |> Enum.find(&(&1.role == "user"))
+        assert last_user != nil
+        refute last_user.content =~ "OP comments:"
+
+        {:ok,
+         %{
+           "choices" => [%{"message" => %{"content" => envelope_json}}]
+         }}
+      end)
+
+      assert {:ok, _result} =
+               LLM.format({"Caption", [], []}, output_language: "en")
+    end
+  end
+
+  # ── Message builder tests: merge/3 ──────────────────────────────
+
+  describe "merge/3 message builder" do
+    test "include transcript text when transcript is present" do
+      envelope_json =
+        Jason.encode!(%{
+          "completeness" => "recipe_complete",
+          "missing_fields" => [],
+          "consult_link" => false,
+          "recipe" => %{"name" => "Test"}
+        })
+
+      Application.put_env(:insta_mealie, InstaMealie.LLM, InstaMealie.LLM.Mock)
+
+      Mox.expect(InstaMealie.LLM.Mock, :chat, fn _model, messages ->
+        last_user = messages |> Enum.reverse() |> Enum.find(&(&1.role == "user"))
+        assert last_user != nil
+        assert last_user.content =~ "Transcript:"
+        assert last_user.content =~ "the voiceover transcript text"
+
+        {:ok,
+         %{
+           "choices" => [%{"message" => %{"content" => envelope_json}}]
+         }}
+      end)
+
+      assert {:ok, _result} =
+               LLM.merge(nil, {"Caption", "the voiceover transcript text", nil},
+                 output_language: "en"
+               )
+    end
+
+    test "shows (empty) transcript marker when transcript is empty string" do
+      envelope_json =
+        Jason.encode!(%{
+          "completeness" => "recipe_complete",
+          "missing_fields" => [],
+          "consult_link" => false,
+          "recipe" => %{"name" => "Test"}
+        })
+
+      Application.put_env(:insta_mealie, InstaMealie.LLM, InstaMealie.LLM.Mock)
+
+      Mox.expect(InstaMealie.LLM.Mock, :chat, fn _model, messages ->
+        last_user = messages |> Enum.reverse() |> Enum.find(&(&1.role == "user"))
+        assert last_user != nil
+        assert last_user.content =~ "Transcript: (empty)"
+
+        {:ok,
+         %{
+           "choices" => [%{"message" => %{"content" => envelope_json}}]
+         }}
+      end)
+
+      assert {:ok, _result} =
+               LLM.merge(nil, {"Caption", "", nil}, output_language: "en")
+    end
+  end
 end

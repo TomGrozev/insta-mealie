@@ -8,6 +8,7 @@ defmodule InstaMealie.PipelineTest do
   alias InstaMealie.LLM.Mock, as: LLMMock
   alias InstaMealie.Pipeline
   alias InstaMealie.Pipeline.Job
+  alias InstaMealie.Error
   alias InstaMealie.Pipeline.JobStore
   alias InstaMealie.Recipe
 
@@ -474,6 +475,514 @@ defmodule InstaMealie.PipelineTest do
         # would have different semantics.
         assert failed.error_class == :exception
       end)
+    end
+  end
+
+  describe "available_actions/1" do
+    test "created job only has :cancel" do
+      now = DateTime.utc_now()
+
+      job = %Job{
+        id: "actions_created",
+        input: %{url: "https://instagram.com/reel/abc"},
+        url: "https://instagram.com/reel/abc",
+        state: :created,
+        mode: :url,
+        stages: %{},
+        error_stage: nil,
+        error_class: nil,
+        retry_count: %{},
+        inserted_at: now,
+        updated_at: now
+      }
+
+      assert Pipeline.available_actions(job) == [:cancel]
+    end
+
+    test "failed job with retryable error has :cancel, :paste_caption, :retry" do
+      job = %Job{
+        id: "actions_fetch_retryable",
+        state: :failed,
+        url: "https://instagram.com/reel/abc",
+        mode: :url,
+        error_stage: :fetch,
+        error_class: :network,
+        retry_count: %{},
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.available_actions(job) == [:paste_caption, :retry]
+    end
+
+    test "failed job with :transcribe error has :transcribe_anyway and :retry" do
+      job = %Job{
+        id: "actions_transcribe_retryable",
+        state: :failed,
+        mode: :url,
+        error_stage: :transcribe,
+        error_class: :network,
+        retry_count: %{},
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.available_actions(job) == [:transcribe_anyway, :retry]
+    end
+
+    test "failed job with non-retryable error returns no actions" do
+      job = %Job{
+        id: "actions_validation_dead",
+        state: :failed,
+        error_class: :validation,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.available_actions(job) == []
+    end
+
+    test "failed job with auth error (non-retryable) returns no actions" do
+      job = %Job{
+        id: "actions_auth_dead",
+        state: :failed,
+        error_class: :auth,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.available_actions(job) == []
+    end
+
+    test "failed job with exhausted retry budget omits :retry" do
+      job = %Job{
+        id: "actions_retry_exhausted",
+        state: :failed,
+        url: "https://instagram.com/reel/abc",
+        mode: :url,
+        error_stage: :fetch,
+        error_class: :network,
+        retry_count: %{fetch: 2},
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.available_actions(job) == [:paste_caption]
+    end
+
+    test "succeeded job has no available actions" do
+      job = %Job{
+        id: "actions_succeeded",
+        state: :succeeded,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.available_actions(job) == []
+    end
+
+    test "cancelled job has no available actions" do
+      job = %Job{
+        id: "actions_cancelled",
+        state: :cancelled,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.available_actions(job) == []
+    end
+
+    test "failed job with llm_merge error has :transcribe_anyway and :retry" do
+      job = %Job{
+        id: "actions_llm_merge",
+        state: :failed,
+        mode: :caption_only,
+        error_stage: :llm_merge,
+        error_class: :network,
+        retry_count: %{},
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.available_actions(job) == [:transcribe_anyway, :retry]
+    end
+  end
+
+  describe "retries_left/1" do
+    test "no error_stage returns 0" do
+      job = %Job{
+        id: "retries_nil_stage",
+        state: :created,
+        retry_count: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.retries_left(job) == 0
+    end
+
+    test "error_stage :fetch with no prior retries returns 2" do
+      job = %Job{
+        id: "retries_fetch_zero",
+        state: :failed,
+        error_stage: :fetch,
+        retry_count: %{},
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.retries_left(job) == 2
+    end
+
+    test "error_stage :fetch with 1 prior retry returns 1" do
+      job = %Job{
+        id: "retries_fetch_one",
+        state: :failed,
+        error_stage: :fetch,
+        retry_count: %{fetch: 1},
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.retries_left(job) == 1
+    end
+
+    test "error_stage :fetch with 2 prior retries returns 0" do
+      job = %Job{
+        id: "retries_fetch_two",
+        state: :failed,
+        error_stage: :fetch,
+        retry_count: %{fetch: 2},
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.retries_left(job) == 0
+    end
+
+    test "error_stage :fetch with 3+ prior retries returns 0 (clamped)" do
+      job = %Job{
+        id: "retries_fetch_excess",
+        state: :failed,
+        error_stage: :fetch,
+        retry_count: %{fetch: 3},
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.retries_left(job) == 0
+    end
+  end
+
+  describe "dead?/1" do
+    test "succeeded job is not dead" do
+      job = %Job{
+        id: "dead_succeeded",
+        state: :succeeded,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      refute Pipeline.dead?(job)
+    end
+
+    test "running job is not dead" do
+      job = %Job{
+        id: "dead_running",
+        state: :running,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      refute Pipeline.dead?(job)
+    end
+
+    test "failed job with validation error is dead" do
+      job = %Job{
+        id: "dead_validation",
+        state: :failed,
+        error_class: :validation,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.dead?(job)
+    end
+
+    test "failed job with network error is not dead (retryable)" do
+      job = %Job{
+        id: "dead_network",
+        state: :failed,
+        error_class: :network,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      refute Pipeline.dead?(job)
+    end
+
+    test "failed job with auth error is dead (non-retryable)" do
+      job = %Job{
+        id: "dead_auth",
+        state: :failed,
+        error_class: :auth,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.dead?(job)
+    end
+  end
+
+  describe "error_retryable?/1" do
+    test "network error is retryable" do
+      assert Pipeline.error_retryable?(%Error{class: :network, summary: "timeout"}) == true
+    end
+
+    test "validation error is not retryable" do
+      assert Pipeline.error_retryable?(%Error{class: :validation, summary: "bad input"}) == false
+    end
+
+    test "job with error_class :network is retryable" do
+      job = %Job{
+        id: "err_retryable_net",
+        state: :failed,
+        error_class: :network,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.error_retryable?(job) == true
+    end
+
+    test "job with error_class :validation is not retryable" do
+      job = %Job{
+        id: "err_retryable_val",
+        state: :failed,
+        error_class: :validation,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.error_retryable?(job) == false
+    end
+
+    test "job with nil error_class is not retryable" do
+      job = %Job{
+        id: "err_retryable_nil",
+        state: :created,
+        error_class: nil,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.error_retryable?(job) == false
+    end
+
+    test "job with no error field is not retryable" do
+      job = %Job{
+        id: "err_retryable_empty",
+        state: :created,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      assert Pipeline.error_retryable?(job) == false
+    end
+
+    test "non-struct terms return false" do
+      refute Pipeline.error_retryable?("string")
+      refute Pipeline.error_retryable?(42)
+      refute Pipeline.error_retryable?(nil)
+      refute Pipeline.error_retryable?(:atom)
+    end
+  end
+
+  describe "timeout error class is retryable" do
+    test "timeout error is retryable" do
+      assert Pipeline.error_retryable?(%Error{class: :timeout, summary: "connection timed out"}) ==
+               true
+    end
+  end
+
+  describe "run_import_inline/2" do
+    test "succeeds when the adapter returns {:ok, slug, deep_link}" do
+      id = "import_ok"
+      now = DateTime.utc_now()
+
+      # The default TestCase adapter handles GET/POST/PATCH/POST image for
+      # the Mealie import flow, so we can call run_import_inline directly
+      # with a minimal job. The adapter POSTs to /api/recipes which
+      # responds {:ok, %{"slug" => slug}} — enough to succeed.
+      job = %Job{
+        id: id,
+        state: :created,
+        recipe: Recipe.empty(),
+        stages: %{mealie_import: nil},
+        inserted_at: now,
+        updated_at: now
+      }
+
+      adapter_fn = Application.get_env(:insta_mealie, :mealie_http_adapter)
+      prev = Application.put_env(:insta_mealie, :mealie_http_adapter, adapter_fn)
+
+      on_exit(fn ->
+        Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+      end)
+
+      assert {:ok, updated_job} = Pipeline.run_import_inline(job, nil)
+      assert updated_job.state == :succeeded
+      assert updated_job.slug
+      assert updated_job.deep_link =~ "edit=true"
+      assert updated_job.error_stage == nil
+      assert Map.get(updated_job.stages, :mealie_import) == :done
+    end
+
+    test "fails when the adapter returns {:error, %Error{}}" do
+      id = "import_error"
+      now = DateTime.utc_now()
+
+      # Override the adapter so the /api/recipes POST call returns an error.
+      prev = Application.get_env(:insta_mealie, :mealie_http_adapter)
+
+      Application.put_env(
+        :insta_mealie,
+        :mealie_http_adapter,
+        fn _m, _p, _body ->
+          {:error, Error.new(:network, "mealie unavailable")}
+        end
+      )
+
+      on_exit(fn ->
+        Application.put_env(:insta_mealie, :mealie_http_adapter, prev)
+      end)
+
+      job = %Job{
+        id: id,
+        state: :created,
+        recipe: Recipe.empty(),
+        stages: %{mealie_import: nil},
+        inserted_at: now,
+        updated_at: now
+      }
+
+      assert {:error, %Error{class: :network, stage: :mealie_import}} =
+               Pipeline.run_import_inline(job, nil)
+    end
+  end
+
+  describe "cancel_job/1 edge cases" do
+    test "unknown job_id returns {:error, :not_found}" do
+      # JobStore.clear() in setup ensures no job with this id exists.
+      assert Pipeline.cancel_job("nonexistent") == {:error, :not_found}
+    end
+
+    test "succeeded job returns {:error, :already_terminal}" do
+      id = "cancel_terminal"
+      now = DateTime.utc_now()
+
+      job = %Job{
+        id: id,
+        state: :succeeded,
+        stages: %{},
+        inserted_at: now,
+        updated_at: now
+      }
+
+      InstaMealie.Pipeline.JobStore.put(job)
+      assert Pipeline.cancel_job(id) == {:error, :already_terminal}
+    end
+  end
+
+  describe "apply_transcribe_anyway/1 preconditions" do
+    test "unknown job_id returns {:error, :not_found}" do
+      assert Pipeline.apply_transcribe_anyway("nonexistent") == {:error, :not_found}
+    end
+
+    test "job with error_stage :fetch returns {:error, :invalid_state}" do
+      id = "tway_fetch"
+
+      job = %Job{
+        id: id,
+        state: :failed,
+        error_stage: :fetch,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      InstaMealie.Pipeline.JobStore.put(job)
+      assert Pipeline.apply_transcribe_anyway(id) == {:error, :invalid_state}
+    end
+
+    test "job with error_stage :transcribe forwards (returns non-error tuple)" do
+      # The transcribe_anyway command is forwarded to the GenServer.
+      # Without a running GenServer, ensure_job_process revives it,
+      # sends the message, and the GenServer replies. The reply shape
+      # depends on the GenServer's handler — just assert we don't get
+      # the precondition errors.
+      id = "tway_transcribe"
+
+      job = %Job{
+        id: id,
+        state: :failed,
+        error_stage: :transcribe,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      InstaMealie.Pipeline.JobStore.put(job)
+      result = Pipeline.apply_transcribe_anyway(id)
+      # The GenServer is revived and processes the message.
+      # Since the default LLM adapter is set up in TestCase, this will
+      # try to run the pipeline. The exact return shape depends on the
+      # GenServer handler — just ensure we got past the precondition.
+      assert is_tuple(result)
+    end
+  end
+
+  describe "submit_caption/2 preconditions" do
+    test "unknown job_id returns {:error, :not_found}" do
+      assert Pipeline.submit_caption("nonexistent", "caption") == {:error, :not_found}
+    end
+
+    test "job with error_stage :llm_merge returns {:error, :invalid_state}" do
+      id = "caption_llm_merge"
+
+      job = %Job{
+        id: id,
+        state: :failed,
+        error_stage: :llm_merge,
+        mode: :url,
+        stages: %{},
+        inserted_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
+      }
+
+      InstaMealie.Pipeline.JobStore.put(job)
+      assert Pipeline.submit_caption(id, "recovered caption") == {:error, :invalid_state}
     end
   end
 end

@@ -1,0 +1,13 @@
+{
+  "coverage_options": {
+    "minimum_coverage": 75,
+    "treat_no_relevant_lines_as_covered": true,
+    "skip_files": [
+      "test/support/",
+      "lib/insta_mealie/llm/adapter\\.ex",
+      "lib/insta_mealie/whisper/adapter\\.ex",
+      "lib/insta_mealie_web/controllers/error_html\\.ex",
+      "lib/insta_mealie_web/controllers/error_json\\.ex"
+    ]
+  }
+}
