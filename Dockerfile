@@ -44,8 +44,10 @@ ENV MIX_ENV=prod \
 # toolchain or openssl-dev is needed: the crypto NIF ships prebuilt in the
 # erlang-28 apk (compiled against Wolfi's no-sm4 libcrypto), and this app's hex
 # deps are pure-Elixir or prebuilt binaries (esbuild/tailwind download platform
-# binaries).
-RUN apk add --no-cache erlang-28 git curl ca-certificates openssl
+# binaries). erlang-28-dev provides the OTP `.hrl` headers (e.g.
+# public_key/include/public_key.hrl) that hex deps like `mint` need at compile
+# time — Wolfi splits OTP application code and headers across two apks.
+RUN apk add --no-cache erlang-28 erlang-28-dev git curl ca-certificates openssl
 
 # Install Elixir 1.20.3 (official precompiled build paired with OTP 28). Wolfi's
 # prebuilt `elixir` apk is only 1.19.5, which does not satisfy mix.exs `~> 1.20`.
