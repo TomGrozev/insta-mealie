@@ -100,6 +100,7 @@ RUN apk add --no-cache \
 # alternative that keeps the install isolated and bypasses PEP 668.
 RUN python3 -m venv /opt/yt-dlp-venv \
  && /opt/yt-dlp-venv/bin/pip install --no-cache-dir "yt-dlp[default,curl-cffi]" \
+ && mkdir -p /usr/local/bin \
  && ln -sf /opt/yt-dlp-venv/bin/yt-dlp /usr/local/bin/yt-dlp
 
 # Build-time gate: fail loudly if yt-dlp cannot impersonate. This mirrors the
