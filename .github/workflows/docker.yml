@@ -3,12 +3,7 @@ name: docker
 on:
   push:
     branches: [main]
-    paths:
-      - Dockerfile
-      - entrypoint.sh
-      - docker-bake.hcl
-      - .hadolint.yaml
-      - .github/workflows/docker.yml
+    tags: ["v*"]
   pull_request:
     paths:
       - Dockerfile
@@ -82,7 +77,8 @@ jobs:
   publish:
     name: publish
     needs: scan
-    # Publishing happens only on push to main (PRs scan + report, never push).
+    # Publishing happens on push to main (edge/sha tags) and on v* tags
+    # (semver tags). PRs scan + report, never publish.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -112,8 +108,11 @@ jobs:
         with:
           images: ${{ steps.image.outputs.base }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=sha,enable={{is_default_branch}}
 
       - name: Build and push (multi-arch, via bake)
         uses: docker/bake-action@v7

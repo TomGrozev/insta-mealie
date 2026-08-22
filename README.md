@@ -132,6 +132,12 @@ mount. There is no database — jobs live in ETS only (see
 [ADR 0001](docs/adr/0001-in-memory-job-tracking.md)) — so no other persistent
 mounts are required.
 
+**Image tags:**
+
+- `latest`, `X.Y.Z`, `X.Y`, `X` — tagged releases, cut from the
+  [Changelog](CHANGELOG.md). Use these to pin a known-good version.
+- `edge` — rebuilt on every push to `main`; may be unstable.
+
 A minimal `docker run`:
 
 ```bash

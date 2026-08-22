@@ -4,8 +4,10 @@ variable "APP" {
   default = "insta-mealie"
 }
 
-# InstaMealie builds from local source — there is no upstream re-layer and
-# therefore no upstream version to pin. VERSION is intentionally absent.
+# Image tags are injected via docker/metadata-action's bake-file output
+# (see .github/workflows/docker.yml), driven by the triggering git ref:
+# a `main` push produces `edge`/`sha-*` tags, a `vX.Y.Z` tag produces
+# semver tags. No static VERSION variable is defined here.
 
 group "default" {
   targets = ["image-local"]
