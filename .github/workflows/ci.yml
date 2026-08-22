@@ -17,7 +17,7 @@ jobs:
       MIX_ENV: test
     strategy:
       matrix:
-        otp: ["29"]
+        otp: ["28"]
         elixir: ["1.20.3"]
 
     steps:

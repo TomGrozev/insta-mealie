@@ -2,12 +2,13 @@
 # InstaMealie — production image (wayfinder ticket #15)
 #
 # Decisions locked inline (see issue #15):
-#  - Build stage: cgr.dev/chainguard/elixir:1.20-dev (Wolfi, not Debian). The OTP
-#    crypto NIF must link against the SAME libcrypto the runtime ships. Wolfi's
-#    OpenSSL is built `no-sm4`, so a Debian-built crypto.so referenced
-#    EVP_sm4_cbc@OPENSSL_3.0.0 which wolfi-base's libcrypto doesn't export - the
-#    crypto NIF failed to load at runtime on every tag. Building on Wolfi aligns
-#    the NIF with the runtime libcrypto and fixes it (see ADR 0007).
+#  - Build stage: cgr.dev/chainguard/wolfi-base (free; the same base the runtime
+#    uses), with Elixir 1.20.3 installed from the official Elixir precompiled
+#    `elixir-otp-28.zip` on Wolfi's `erlang-28` (OTP 28) apk. The cgr.dev/chainguard/elixir
+#    image is PREMIUM (paid) and Wolfi's own `elixir` apk is only 1.19 (too old for
+#    mix.exs ~> 1.20), hence the zip install. Building OTP on Wolfi compiles the crypto
+#    NIF against the same no-sm4 libcrypto the runtime ships, fixing the EVP_sm4_cbc
+#    load failure that a Debian build caused (see ADR 0007).
 #  - Runtime base: cgr.dev/chainguard/wolfi-base (glibc). yt-dlp's --impersonate
 #    depends on curl_cffi, which only ships manylinux/glibc prebuilt wheels;
 #    Alpine/musl has no prebuilt wheel and building is fragile, so glibc is
@@ -25,23 +26,39 @@
 #    `readOnlyRootFilesystem: true` and a single emptyDir on /tmp.
 
 # ---------- Build stage ----------
-FROM cgr.dev/chainguard/elixir:1.20-dev AS build
+FROM cgr.dev/chainguard/wolfi-base:latest AS build
 
-# Chainguard images default to non-root (UID 65532); apk requires root. The build
-# stage is ephemeral - only the compiled release (COPY --chown=65532:65532 below)
-# reaches the runtime, so running the build as root does not ship root.
+# wolfi-base defaults to a non-root user; apk requires root to install the Erlang
+# toolchain. The build stage is ephemeral - only the compiled release
+# (COPY --chown=65532:65532 below) reaches the runtime, so running the build as
+# root does not ship root.
 USER root
 
 ENV MIX_ENV=prod \
     PHX_HOST=example.com
 
-# Wolfi/apk equivalents of the Debian build tooling. git is required for the
-# GitHub-sourced deps (heroicons, daisyui); curl + ca-certificates for Hex/HTTPS.
-# No C toolchain (build-base/openssl-dev) is needed: this app's hex deps are
-# pure-Elixir or prebuilt (esbuild/tailwind download platform binaries), so the
-# OTP crypto NIF is used as shipped by the Wolfi-built Elixir image (no recompile
-# against openssl-dev here), preserving the SM4-free ABI that matches the runtime.
-RUN apk add --no-cache git curl ca-certificates
+# Wolfi's free apk provides OTP 28 (erlang-28) but no Elixir >= 1.20 (only 1.19).
+# So: install the OTP toolchain via apk, then Elixir 1.20.3 from the official
+# precompiled release zip. openssl is required because erlang-28 links against
+# libcrypto3/libssl3 at runtime but does not declare them as apk deps. No C
+# toolchain or openssl-dev is needed: the crypto NIF ships prebuilt in the
+# erlang-28 apk (compiled against Wolfi's no-sm4 libcrypto), and this app's hex
+# deps are pure-Elixir or prebuilt binaries (esbuild/tailwind download platform
+# binaries).
+RUN apk add --no-cache erlang-28 git curl ca-certificates openssl
+
+# Install Elixir 1.20.3 (official precompiled build paired with OTP 28). Wolfi's
+# prebuilt `elixir` apk is only 1.19.5, which does not satisfy mix.exs `~> 1.20`.
+ARG ELIXIR_VERSION=1.20.3
+RUN curl -fSL -o /tmp/elixir.zip https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-28.zip \
+ && mkdir -p /opt/elixir \
+ && unzip -q /tmp/elixir.zip -d /opt/elixir \
+ && ln -sf /opt/elixir/bin/elixir /usr/local/bin/elixir \
+ && ln -sf /opt/elixir/bin/elixirc /usr/local/bin/elixirc \
+ && ln -sf /opt/elixir/bin/mix /usr/local/bin/mix \
+ && ln -sf /opt/elixir/bin/iex /usr/local/bin/iex \
+ && chmod +x /opt/elixir/bin/* \
+ && rm -f /tmp/elixir.zip
 
 WORKDIR /app
 
