@@ -53,6 +53,7 @@ ARG ELIXIR_VERSION=1.20.3
 RUN curl -fSL -o /tmp/elixir.zip https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-28.zip \
  && mkdir -p /opt/elixir \
  && unzip -q /tmp/elixir.zip -d /opt/elixir \
+ && mkdir -p /usr/local/bin \
  && ln -sf /opt/elixir/bin/elixir /usr/local/bin/elixir \
  && ln -sf /opt/elixir/bin/elixirc /usr/local/bin/elixirc \
  && ln -sf /opt/elixir/bin/mix /usr/local/bin/mix \
