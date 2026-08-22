@@ -1,0 +1,21 @@
+ignore:
+  - vulnerability: CVE-2026-7210
+    fix-state: not-fixed
+    reason: "No fixed Wolfi apk package available yet for python-3.12; revisit once upstream ships a fix"
+    package:
+      name: python-3.12
+      type: apk
+
+  - vulnerability: CVE-2026-4224
+    fix-state: not-fixed
+    reason: "No fixed Wolfi apk package available yet for python-3.12; revisit once upstream ships a fix"
+    package:
+      name: python-3.12
+      type: apk
+
+  - vulnerability: CVE-2026-3644
+    fix-state: not-fixed
+    reason: "No fixed Wolfi apk package available yet for python-3.12; revisit once upstream ships a fix"
+    package:
+      name: python-3.12
+      type: apk

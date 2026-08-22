@@ -19,7 +19,7 @@
 #    `readOnlyRootFilesystem: true` and a single emptyDir on /tmp.
 
 # ---------- Build stage ----------
-FROM elixir:1.17 AS build
+FROM elixir:1.20 AS build
 
 ENV MIX_ENV=prod \
     PHX_HOST=example.com
