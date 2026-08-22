@@ -2,6 +2,12 @@
 # InstaMealie — production image (wayfinder ticket #15)
 #
 # Decisions locked inline (see issue #15):
+#  - Build stage: cgr.dev/chainguard/elixir:1.20-dev (Wolfi, not Debian). The OTP
+#    crypto NIF must link against the SAME libcrypto the runtime ships. Wolfi's
+#    OpenSSL is built `no-sm4`, so a Debian-built crypto.so referenced
+#    EVP_sm4_cbc@OPENSSL_3.0.0 which wolfi-base's libcrypto doesn't export - the
+#    crypto NIF failed to load at runtime on every tag. Building on Wolfi aligns
+#    the NIF with the runtime libcrypto and fixes it (see ADR 0007).
 #  - Runtime base: cgr.dev/chainguard/wolfi-base (glibc). yt-dlp's --impersonate
 #    depends on curl_cffi, which only ships manylinux/glibc prebuilt wheels;
 #    Alpine/musl has no prebuilt wheel and building is fragile, so glibc is
@@ -19,18 +25,23 @@
 #    `readOnlyRootFilesystem: true` and a single emptyDir on /tmp.
 
 # ---------- Build stage ----------
-FROM elixir:1.20 AS build
+FROM cgr.dev/chainguard/elixir:1.20-dev AS build
+
+# Chainguard images default to non-root (UID 65532); apk requires root. The build
+# stage is ephemeral - only the compiled release (COPY --chown=65532:65532 below)
+# reaches the runtime, so running the build as root does not ship root.
+USER root
 
 ENV MIX_ENV=prod \
     PHX_HOST=example.com
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        git \
-        curl \
-        ca-certificates \
-        libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Wolfi/apk equivalents of the Debian build tooling. git is required for the
+# GitHub-sourced deps (heroicons, daisyui); curl + ca-certificates for Hex/HTTPS.
+# No C toolchain (build-base/openssl-dev) is needed: this app's hex deps are
+# pure-Elixir or prebuilt (esbuild/tailwind download platform binaries), so the
+# OTP crypto NIF is used as shipped by the Wolfi-built Elixir image (no recompile
+# against openssl-dev here), preserving the SM4-free ABI that matches the runtime.
+RUN apk add --no-cache git curl ca-certificates
 
 WORKDIR /app
 

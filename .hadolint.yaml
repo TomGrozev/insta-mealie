@@ -4,6 +4,7 @@ ignored:
   - DL3013    # Pin versions in pip install
   - DL3008    # Pin versions in apt-get install
   - DL4006    # Set SHELL option -o pipefail
+  - DL3002    # The build stage runs as root so `apk add` works; it is ephemeral (only the compiled release ships, via COPY --chown), the runtime stage is USER 65532
   - SC3060    # shellcheck disable
   # The Wolfi base image is pinned to `:latest` and bumped manually; InstaMealie
   # does not run Renovate, so DL3007 is accepted for the same reason as in
