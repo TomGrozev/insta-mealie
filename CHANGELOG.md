@@ -5,6 +5,13 @@ All notable changes to InstaMealie will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1](https://github.com/TomGrozev/insta-mealie/compare/v0.1.0...v0.1.1) (2026-08-22)
+
+
+### Bug Fixes
+
+* drop fix-state condition from Grype ignore rules ([6d64763](https://github.com/TomGrozev/insta-mealie/commit/6d64763ba0f3f4cfa7f1e8debaf8481db3943675))
+
 ## [0.1.0] - 2026-08-22
 
 Initial release of InstaMealie — a single-user Phoenix application that turns Instagram reels into Mealie recipes.
